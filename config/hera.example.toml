@@ -1,0 +1,46 @@
+# Copy to <HERA_HOME>/hera.toml (default HERA_HOME is ~/.hera). Never commit the real file.
+
+[budget]                       # first values; tune after the pilot
+per_task_usd = 3.00
+per_day_usd = 4.00
+per_month_usd = 45.00
+month_reserve_fraction = 0.10  # held back for disputes and escalations
+strong_tier_max_share = 0.35
+
+[prices]                       # USD per million tokens; dated so a stale table is visible
+as_of = "2026-11-14"
+
+[prices.tiers.cheap]
+input = 0.10
+output = 0.50
+cache_read = 0.01
+cache_write = 0.125
+
+[prices.tiers.default]
+input = 2.00
+output = 10.00
+cache_read = 0.10
+cache_write = 2.50
+
+[prices.tiers.strong]
+input = 8.00
+output = 40.00
+cache_read = 0.20
+cache_write = 10.00
+
+[prices.tiers.local]
+input = 0.0
+output = 0.0
+cache_read = 0.0
+cache_write = 0.0
+
+[models]                       # fill in the exact dated model identifiers you use
+cheap = ""
+default = ""
+strong = ""
+local = "mlx-community/Qwen3.5-9B-OptiQ-4bit"
+
+[local_model]
+host_memory_limit_gb = 9.0
+max_context_tokens = 12000
+enable_thinking = false        # the model thinks by default; off for short local contexts

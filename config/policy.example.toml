@@ -1,0 +1,14 @@
+# Copy to <HERA_HOME>/policy/policy.toml. This file stays on your machine.
+# A repository with no entry here is treated as "sensitive".
+
+[[repo]]
+id = "example-public"
+path = "~/code/example-public"
+class = "public"               # public | personal | proprietary | sensitive
+
+# Deny-list terms are entered here locally, never in the repository or any prompt.
+# [[term]]
+# term = "..."
+# kind = "brand"               # brand | product | project | platform | person | system | table | path
+# match = "word"               # exact | word | case_insensitive | fuzzy
+# action = "block"             # block | review | signal

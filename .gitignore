@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+.env
+.env.*
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+# local policy and deny lists never belong in the repository
+policy/
+denylist*.toml
+!config/*.example.toml
