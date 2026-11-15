@@ -55,3 +55,7 @@ carries no usage, `reply.usage_reported` is `False` and zero is recorded, so che
 - A remote destination must use `https`. Plain `http` is accepted only for loopback addresses.
 - The `local` tier is free and exempt from spending caps, so a provider on the `local` tier must point at a destination marked `local` (a loopback address), and the reverse.
 - If a paid provider's reply carries no token usage, the call is recorded with a size-based estimate and its purpose is suffixed `:estimated`. It is never recorded as free.
+
+## Grok (xAI)
+
+`GrokProvider` uses xAI's OpenAI-compatible, stateless chat-completions endpoint: URL `https://api.x.ai/v1/chat/completions`, header `Authorization: Bearer <key>`. Differences from the generic adapter: it always sends `max_completion_tokens`, drops `stop`, and counts reasoning tokens as output so reasoning is never billed as free. Like every remote provider it is a remote destination: only public or explicitly approved content may be sent, and xAI's data-retention terms have not been reviewed for this project. Tested against a mock server only.
