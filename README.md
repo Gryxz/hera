@@ -4,7 +4,7 @@ A coordinator that gets coding tasks done by AI models and only calls them done 
 
 Private project for a group of four. Each member runs their own copy.
 
-> **Status: milestone 0.1, step 2 of 10 is done (foundations, egress gateway and labeller; S2 pending review).** Nothing here calls a model or reads a repository yet; the egress gateway is the only code that can open a network connection and is exercised against a loopback server only. Next up is step S3. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+> **Status: milestone 0.1, step 3 of 10 is done (foundations, egress gateway and labeller, scanners v0; S3 pending review).** Nothing here calls a model or reads a repository yet; the egress gateway is the only code that can open a network connection and is exercised against a loopback server only. Next up is step S4. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ---
 
@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 56 tests should pass
+pytest -q                       # 250 tests should pass
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -76,15 +76,16 @@ Around that loop:
 | `src/hera/privacy/labels.py` | Artefact labels, content hashes, strictest-class derivation | done |
 | `src/hera/privacy/grants.py` | Approval store (hash-bound, destination-bound, expiring); local user command only | done |
 | `src/hera/privacy/gateway.py` | The only network client; fail-closed; logs every send and block | done |
+| `src/hera/privacy/scanners/` | Second-line scanners: secrets, personal-data shapes, data-file sniffing, deny-list terms; see `docs/SCANNERS.md` | done (v0) |
 | `src/hera/oracle/verdict.py` | Verdict as a pure function of a verification receipt | done |
 | `src/hera/types.py` | Shared data types and enums | done |
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
 | `src/hera/cli.py` | `hera init`, `hera status` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks | 56 passing |
+| `tests/` | One test file per module, plus portability checks | 250 passing |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
-Not built yet: scanners, provider adapters, local model host, sandbox and worktrees, check authoring and verification, agent loop, recovery, attribution.
+Not built yet: provider adapters, local model host, sandbox and worktrees, check authoring and verification, agent loop, recovery, attribution.
 
 ## Rules — please do not break these
 
@@ -108,23 +109,21 @@ Not built yet: scanners, provider adapters, local model host, sandbox and worktr
 - Commit messages: what changed and why, in plain sentences.
 - One build-plan step per pull request where practical; update the step's status in `docs/BUILD_PLAN.md` in the same pull request.
 
-## Next step: S3 — scanners v0
+## Next step: S4 — provider adapters
 
 Build:
-- Secret patterns and entropy checks.
-- Structural detectors: email, phone, address shape, order / tracking / payment formats.
-- A field-combination rule (several weak signals together become a finding).
-- Deny-list terms with a match mode and an action, loaded from the local policy file (`policy.py` already loads `[[term]]` entries).
-- A block notice that never echoes a term.
+- An OpenAI-compatible adapter covering llama-server, a friend's endpoint, a pooled model and one vendor.
+- A second vendor adapter.
+- Stateless endpoints only.
+- Every call goes through the Gateway.
+- Usage recorded to the ledger, and caps checked before each call.
 
-Scanners plug into the gateway as `bytes -> list[str]` callables returning finding names only.
-
-Done when a seeded-corpus test reports recall and false-block rate per category, with known misses listed rather than hidden.
+Done when mock-server tests pass and a capped call raises instead of sending.
 
 ## Known gaps and honest caveats
 
 - Tests have run on Linux with Python 3.13 only. macOS and 3.11 run in CI on the first push.
-- The privacy gate decides correctly only if labels are right. Labelling is built (S2); scanning (S3) is not.
+- The privacy gate decides correctly only if labels are right. Labelling (S2) and first scanners (S3) are built; the scanners are measured on a small synthetic corpus only, see `docs/SCANNERS.md`.
 - Automated secret and personal-data detection will never be complete. The design relies on default-deny classification first; scanners are a second line.
 - Spending caps and prices in the example config are first values, not measurements.
 - Running one model across several machines is a later milestone and is unmeasured for the models in question.

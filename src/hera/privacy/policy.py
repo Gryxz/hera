@@ -9,7 +9,7 @@ from ..types import RepoClass
 @dataclass
 class Policy:
     repos: dict[str, tuple[Path, RepoClass]] = field(default_factory=dict)
-    terms: list[dict] = field(default_factory=list)     # loaded, not used before step S3
+    terms: list[dict] = field(default_factory=list)     # deny-list; used by privacy/scanners/terms.py
 
     def repo_class(self, repo_id: str) -> RepoClass:
         entry = self.repos.get(repo_id)

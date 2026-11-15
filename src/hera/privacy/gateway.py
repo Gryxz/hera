@@ -50,13 +50,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 Scanner = Callable[[bytes], list]
+Blocking = Callable[[list], list]      # all findings of one payload -> the ones that block
 Envelope = Callable[[Sequence[Segment]], bytes]
 
 
 class Gateway:
     def __init__(self, conn, label_store: LabelStore, grant_store: GrantStore,
                  destinations: dict[str, Destination], *, max_payload_bytes: int = 2_000_000,
-                 scanners: Iterable[Scanner] = (), clock: Callable[[], float] = time.time,
+                 scanners: Iterable[Scanner] = (), blocking: Blocking = list,
+                 clock: Callable[[], float] = time.time,
                  timeout: float = 60) -> None:
         self.conn = conn
         self.labels = label_store
@@ -64,6 +66,7 @@ class Gateway:
         self.destinations = dict(destinations)
         self.max_payload_bytes = max_payload_bytes
         self.scanners = tuple(scanners)
+        self.blocking = blocking          # default: every finding blocks
         self.clock = clock
         self.timeout = timeout
 
@@ -72,11 +75,14 @@ class Gateway:
         artefacts: list[dict] = []
         grant_ids: list[str] = []
         joined = b""
+        scanner_record: dict = {}
         try:
             segments = list(segments)
             joined = b"\n".join(s.data for s in segments)
-            payload = self._decide(destination_name, segments, envelope, artefacts, grant_ids)
-            self._log("sent", destination_name, purpose, task_id, artefacts, grant_ids, {}, "", payload)
+            payload = self._decide(destination_name, segments, envelope, artefacts, grant_ids,
+                                   scanner_record)
+            self._log("sent", destination_name, purpose, task_id, artefacts, grant_ids,
+                      scanner_record, "", payload)
         except _Blocked as b:
             return self._block(b.reason, destination_name, purpose, task_id, artefacts,
                                grant_ids, b.scanner, joined)
@@ -87,7 +93,7 @@ class Gateway:
 
     # -- decision path ---------------------------------------------------------------
     def _decide(self, name: str, segments: list[Segment], envelope: Envelope | None,
-                artefacts: list[dict], grant_ids: list[str]) -> bytes:
+                artefacts: list[dict], grant_ids: list[str], scanner_record: dict) -> bytes:
         if name == LOCAL:
             raise _Blocked("local is not a network destination")
         dest = self.destinations.get(name)
@@ -121,7 +127,13 @@ class Gateway:
                 if names:
                     found.setdefault(seg.artefact_id, []).extend(names)
         if found:
-            raise _Blocked("restricted data finding", {"findings": found})
+            everything = [n for names in found.values() for n in names]
+            blocking = [str(n) for n in self.blocking(everything)]
+            if blocking:
+                reason = ("held for user review" if all(n.startswith("term:review") for n in blocking)
+                          else "restricted data finding")
+                raise _Blocked(reason, {"findings": found, "blocking": sorted(set(blocking))})
+            scanner_record["findings"] = found       # recorded, did not block on their own
         if sum(len(s.data) for s in segments) > self.max_payload_bytes:
             raise _Blocked("oversize payload")
         now = self.clock()
