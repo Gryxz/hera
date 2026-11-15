@@ -258,3 +258,68 @@ def test_blocking_predicate_failure_fails_closed(conn, sink):
         raise RuntimeError("details")
     e = Env(conn, sink[0], scanners=[lambda d: ["x"]], blocking=boom)
     blocked(e, sink, "internal error", "prov", [e.label("a", "pub", b"x")], purpose="p")
+
+
+# -- loopback destinations ------------------------------------------------------------------
+def local_env(conn, sink, **kw):
+    url = f"http://127.0.0.1:{sink[0].server_address[1]}/v1"
+    gw = Gateway(conn, LabelStore(conn), GrantStore(conn),
+                 {"local-llm": Destination("local-llm", url, {"Authorization": KEY}, local=True)},
+                 timeout=5, **kw)
+    return gw
+
+
+def test_local_destination_delivers_unlabelled_and_sensitive(conn, sink):
+    gw = local_env(conn, sink)
+    pol = Policy(repos={"sens": (None, RepoClass.SENSITIVE)})
+    label_bytes(gw.labels, pol, artefact_id="s", repo_id="sens", data=b"raw sensitive")
+    r1 = gw.send("local-llm", [Segment("ghost", b"unlabelled text")], purpose="p")
+    r2 = gw.send("local-llm", [Segment("s", b"raw sensitive")], purpose="p", task_id="t")
+    assert r1.sent and r2.sent and sink[1] == [b"unlabelled text", b"raw sensitive"]
+    rows = [dict(r) for r in conn.execute("SELECT * FROM transmissions ORDER BY seq")]
+    assert [r["decision"] for r in rows] == ["sent", "sent"]
+    assert all(r["reason"] == "loopback" for r in rows)
+    assert json.loads(rows[0]["artefacts_json"]) == [{"id": "ghost"}]
+    assert "invented-key" not in str(rows)
+    assert translog.verify(conn) == (True, None)
+
+
+def test_local_destination_skips_scanners_but_not_size(conn, sink):
+    gw = local_env(conn, sink, scanners=[lambda d: ["x"]], max_payload_bytes=10)
+    assert gw.send("local-llm", [Segment("a", b"y" * 10)], purpose="p").sent
+    r = gw.send("local-llm", [Segment("a", b"y" * 11)], purpose="p")
+    assert not r.sent and r.reason == "oversize payload" and len(sink[1]) == 1
+    r = gw.send("local-llm", [Segment("a", b"y")], purpose="p", envelope=lambda s: b"z" * 11)
+    assert not r.sent and r.reason == "oversize payload"
+    assert conn.execute("SELECT decision, reason FROM transmissions ORDER BY seq DESC LIMIT 1"
+                        ).fetchone()[:] == ("blocked", "oversize payload")
+
+
+@pytest.mark.parametrize("url", [
+    "http://192.168.1.5:8080/v1/chat/completions", "http://example.com/v1/chat",
+    "http://127.0.0.1.evil.example/v1", "http://localhost.evil.example/v1",
+    "http://evil.example/127.0.0.1", "http://127.0.0.1@evil.example/v1", "http://[::2]/v1",
+    "http://0.0.0.0:80/v1", "http://128.0.0.1/v1", "ftp://127.0.0.1/v1", "127.0.0.1:8080/v1"])
+def test_local_flag_requires_loopback_host(conn, url):
+    with pytest.raises(ValueError):
+        Gateway(conn, LabelStore(conn), GrantStore(conn), {"x": Destination("x", url, local=True)})
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:1/v", "http://127.5.6.7/v", "http://[::1]:9/v",
+                                 "http://localhost:8080/v", "https://LOCALHOST/v"])
+def test_local_flag_accepts_loopback_hosts(conn, url):
+    Gateway(conn, LabelStore(conn), GrantStore(conn), {"x": Destination("x", url, local=True)})
+
+
+def test_non_local_destination_on_loopback_still_checked(env, sink):
+    """local=False (the default) keeps every check even when the host is 127.0.0.1."""
+    r = env.gw.send("prov", [Segment("ghost", b"x")], purpose="p")
+    assert not r.sent and r.reason == "unlabelled segment" and sink[1] == []
+
+
+def test_reserved_local_name_still_blocked_with_local_destination(conn, sink):
+    url = f"http://127.0.0.1:{sink[0].server_address[1]}/v1"
+    gw = Gateway(conn, LabelStore(conn), GrantStore(conn),
+                 {"local": Destination("local", url, local=True)}, timeout=5)
+    r = gw.send("local", [Segment("a", b"x")], purpose="p")
+    assert not r.sent and r.reason == "local is not a network destination" and sink[1] == []

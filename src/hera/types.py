@@ -110,3 +110,5 @@ class ModelReply:
     text: str
     usage: Usage = field(default_factory=Usage)
     model_id: str = ""
+    tool_calls: tuple = ()
+    usage_reported: bool = True

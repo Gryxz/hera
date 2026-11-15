@@ -4,7 +4,7 @@ A coordinator that gets coding tasks done by AI models and only calls them done 
 
 Private project for a group of four. Each member runs their own copy.
 
-> **Status: milestone 0.1, step 3 of 10 is done (foundations, egress gateway and labeller, scanners v0; S3 pending review).** Nothing here calls a model or reads a repository yet; the egress gateway is the only code that can open a network connection and is exercised against a loopback server only. Next up is step S4. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+> **Status: milestone 0.1, step 4 of 10 is done (foundations, egress gateway and labeller, scanners v0, provider adapters; S4 pending review).** Nothing here has called a real model or read a repository yet; the egress gateway is the only code that can open a network connection and the provider adapters are exercised against loopback mock servers only. Next up is step S5. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ---
 
@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 250 tests should pass
+pytest -q                       # 293 tests should pass
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -77,15 +77,16 @@ Around that loop:
 | `src/hera/privacy/grants.py` | Approval store (hash-bound, destination-bound, expiring); local user command only | done |
 | `src/hera/privacy/gateway.py` | The only network client; fail-closed; logs every send and block | done |
 | `src/hera/privacy/scanners/` | Second-line scanners: secrets, personal-data shapes, data-file sniffing, deny-list terms; see `docs/SCANNERS.md` | done (v0) |
+| `src/hera/providers/` | OpenAI-compatible and Anthropic Messages adapters; build and parse JSON only, every request goes through the gateway; see `docs/PROVIDERS.md` | done (mock servers only) |
 | `src/hera/oracle/verdict.py` | Verdict as a pure function of a verification receipt | done |
 | `src/hera/types.py` | Shared data types and enums | done |
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
 | `src/hera/cli.py` | `hera init`, `hera status` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks | 250 passing |
+| `tests/` | One test file per module, plus portability checks | 293 passing |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
-Not built yet: provider adapters, local model host, sandbox and worktrees, check authoring and verification, agent loop, recovery, attribution.
+Not built yet: local model host, sandbox and worktrees, check authoring and verification, agent loop, recovery, attribution.
 
 ## Rules — please do not break these
 
@@ -109,16 +110,15 @@ Not built yet: provider adapters, local model host, sandbox and worktrees, check
 - Commit messages: what changed and why, in plain sentences.
 - One build-plan step per pull request where practical; update the step's status in `docs/BUILD_PLAN.md` in the same pull request.
 
-## Next step: S4 — provider adapters
+## Next step: S5 — local model host
 
 Build:
-- An OpenAI-compatible adapter covering llama-server, a friend's endpoint, a pooled model and one vendor.
-- A second vendor adapter.
-- Stateless endpoints only.
-- Every call goes through the Gateway.
-- Usage recorded to the ledger, and caps checked before each call.
+- A supervised child process for the 9B model with an explicit memory limit, a context cap taken from free memory, thinking off, and kill-to-evict and reload.
+- On non-Mac hosts, an OpenAI-compatible local endpoint instead.
 
-Done when mock-server tests pass and a capped call raises instead of sending.
+Done when the host survives 20 load/generate/evict cycles under the 9.0 GB limit and the second Mac benchmark pass is recorded.
+
+S5's Mac part needs a Mac to run and test; it cannot be finished or verified on a Linux-only machine.
 
 ## Known gaps and honest caveats
 

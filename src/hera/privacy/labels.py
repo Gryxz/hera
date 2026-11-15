@@ -58,3 +58,13 @@ def derive(store: LabelStore, *, artefact_id: str, inputs: list[str], data: byte
     label = Label(artefact_id, cls, content_hash(data), findings, tuple(inputs))
     store.put(label)
     return label
+
+
+def label_builtin(store: LabelStore, *, artefact_id: str, data: bytes) -> Label:
+    """Label HERA's own static prompt text as public, with no findings.
+
+    Only for prompt templates shipped in this repository. Never use it for anything read from a
+    user repository or produced by a model: those must be labelled from policy or derived."""
+    label = Label(artefact_id, RepoClass.PUBLIC, content_hash(data), (), ("hera-builtin",))
+    store.put(label)
+    return label
