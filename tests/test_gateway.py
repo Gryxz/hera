@@ -184,3 +184,77 @@ def test_sensitive_content_needs_a_declassified_grant(env, sink):
     assert sink[1] == [clean.data]
     assert env.gw.send("prov", [raw], purpose="implement").sent is False     # raw still blocked
     assert translog.verify(env.conn) == (True, None)
+
+
+# -- scanners v0 wired into the gateway -----------------------------------------------------
+def scanned_env(conn, sink, terms=(), **kw):
+    from hera.privacy.scanners import BLOCKING, default_scanners
+    policy = Policy(terms=list(terms))
+    return Env(conn, sink[0], scanners=default_scanners(policy), blocking=BLOCKING, **kw)
+
+
+def test_planted_key_in_public_segment_is_blocked_by_default_scanners(conn, sink):
+    from hera.privacy.scanners import default_scanners
+    key = "AKIA" + "TESTFAKE0000KEY1"                          # invented, format-valid
+    e = Env(conn, sink[0], scanners=default_scanners())
+    seg = e.label("a", "pub", f"config = 1\nnote: {key}\n".encode())
+    r = e.gw.send("prov", [seg], purpose="implement")
+    assert not r.sent and r.reason == "restricted data finding" and sink[1] == []
+    row = e.rows()[-1]
+    assert row["decision"] == "blocked"
+    assert "secret:aws_access_key" in row["scanner_json"]
+    assert key not in str(row) and key not in r.reason and "TESTFAKE" not in str(row)
+    assert translog.verify(conn) == (True, None)
+
+
+def test_signal_only_term_does_not_block_but_is_recorded(conn, sink):
+    e = scanned_env(conn, sink, terms=[{"term": "kestrelforge", "match": "word", "action": "signal"}])
+    seg = e.label("a", "pub", b"notes about kestrelforge here")
+    assert e.gw.send("prov", [seg], purpose="p").sent
+    assert sink[1] == [seg.data]
+    row = e.rows()[-1]
+    assert row["decision"] == "sent" and "term:signal#0" in row["scanner_json"]
+    assert "kestrelforge" not in str(row)
+
+
+def test_signal_term_with_email_blocks(conn, sink):
+    e = scanned_env(conn, sink, terms=[{"term": "kestrelforge", "match": "word", "action": "signal"}])
+    seg = e.label("a", "pub", b"kestrelforge contact ines@quillmere.io")
+    r = e.gw.send("prov", [seg], purpose="p")
+    assert not r.sent and r.reason == "restricted data finding" and sink[1] == []
+    scanner = json.loads(e.rows()[-1]["scanner_json"])
+    assert "term:signal#0" in scanner["blocking"] and "pii:email" in scanner["blocking"]
+    assert "quillmere" not in str(e.rows()[-1]) and "kestrelforge" not in str(e.rows()[-1])
+
+
+def test_signal_and_email_in_different_segments_still_block(conn, sink):
+    e = scanned_env(conn, sink, terms=[{"term": "kestrelforge", "match": "word", "action": "signal"}])
+    s1, s2 = e.label("a", "pub", b"kestrelforge"), e.label("b", "pub", b"mail ines@quillmere.io")
+    assert not e.gw.send("prov", [s1, s2], purpose="p").sent and sink[1] == []
+
+
+def test_review_term_is_held_for_user_review(conn, sink):
+    e = scanned_env(conn, sink, terms=[{"term": "mirelark", "match": "exact", "action": "review"}])
+    row = blocked(e, sink, "held for user review", "prov",
+                  [e.label("a", "pub", b"the mirelark file")], purpose="p")
+    assert "term:review#0" in row["scanner_json"] and "mirelark" not in str(row)
+
+
+def test_block_term_blocks_without_echoing_it(conn, sink):
+    e = scanned_env(conn, sink, terms=[{"term": "zorbulon", "match": "fuzzy", "action": "block"}])
+    r = e.gw.send("prov", [e.label("a", "pub", b"z0rbul0n plans")], purpose="p")
+    assert not r.sent and r.reason == "restricted data finding" and "zorbulon" not in str(e.rows()[-1])
+
+
+def test_default_blocking_predicate_blocks_every_finding(conn, sink):
+    from hera.privacy.scanners import default_scanners
+    terms = [{"term": "kestrelforge", "match": "word", "action": "signal"}]
+    e = Env(conn, sink[0], scanners=default_scanners(Policy(terms=terms)))    # no `blocking` given
+    assert not e.gw.send("prov", [e.label("a", "pub", b"kestrelforge")], purpose="p").sent
+
+
+def test_blocking_predicate_failure_fails_closed(conn, sink):
+    def boom(findings):
+        raise RuntimeError("details")
+    e = Env(conn, sink[0], scanners=[lambda d: ["x"]], blocking=boom)
+    blocked(e, sink, "internal error", "prov", [e.label("a", "pub", b"x")], purpose="p")
