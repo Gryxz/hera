@@ -74,15 +74,23 @@ def test_unrelated_error_on_a_new_check_is_invalid(conn, toy):
     assert rep.health_of("chk-fix").health is CheckHealth.INVALID
 
 
-def test_flaky_check_is_rejected_with_real_runs(conn, toy, tmp_path):
-    """Flakiness from something that differs between fresh checkouts: the clock's sub-second parity
-    is not reliable, so the check alternates on a file kept outside the checkout (a shared counter)."""
-    counter = str(tmp_path / "counter")
-    (tmp_path / "counter").mkdir()
-    src = (f"import os\n\n\ndef test_flaky():\n    p = {counter!r} + '/n'\n"
-           "    n = len(os.listdir(os.path.dirname(p)))\n    open(p + str(n), 'w').close()\n    assert n % 2 == 1\n")
+def test_flaky_check_is_rejected_with_real_runs(conn, toy):
+    """Each validation run gets a fresh checkout, so flakiness has to come from something that
+    differs between checkouts. The factory plants a marker whose value alternates per run; the
+    check reads it from its working directory, which works inside a real sandbox too."""
+    base = factory(toy)
+    calls = {"n": 0}
+
+    def alternating():
+        out = base()
+        checkout = out[0] if isinstance(out, tuple) else out
+        (checkout / "run_marker.txt").write_text(str(calls["n"]))
+        calls["n"] += 1
+        return out
+
+    src = "def test_flaky():\n    assert int(open('run_marker.txt').read()) % 2 == 1\n"
     chk = (DraftCheck("chk-flaky", ("R-1",), "visible", "test_flaky.py", "test_flaky"),)
-    rep = validate_on_base(AD, factory(toy), freeze_with(conn, chk, {"test_flaky.py": src.encode()}),
+    rep = validate_on_base(AD, alternating, freeze_with(conn, chk, {"test_flaky.py": src.encode()}),
                            runs=3, allow_unsandboxed=True)
     v = rep.health_of("chk-flaky")
     assert v.health is CheckHealth.FLAKY and v.rule == "status_differs" and rep.rejected == ("chk-flaky",) and not rep.ok

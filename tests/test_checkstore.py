@@ -133,6 +133,7 @@ def test_verify_integrity_detects_modified_deleted_and_added(conn, hera_home):
     with pytest.raises(CheckStoreTampered):
         verify_integrity(cs)
     extra.unlink()
+    writable(cs.root)          # the store is read-only; a non-root user must lift that to tamper
     (cs.root / "stray").mkdir()
     with pytest.raises(CheckStoreTampered):
         verify_integrity(cs)
