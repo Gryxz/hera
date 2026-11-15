@@ -3,7 +3,7 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -24,4 +24,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         raise RuntimeError(f"state store is schema {version}; this build understands {SCHEMA_VERSION}")
     if version < 1:
         sql = resources.files("hera.store").joinpath("schema.sql").read_text(encoding="utf-8")
-        conn.executescript("BEGIN;" + sql + f"PRAGMA user_version={SCHEMA_VERSION};COMMIT;")
+        conn.executescript("BEGIN;" + sql + "PRAGMA user_version=1;COMMIT;")
+        version = 1
+    if version < 2:      # grants.declassified: only such grants can release sensitive-origin text
+        conn.executescript("BEGIN;ALTER TABLE grants ADD COLUMN declassified INTEGER NOT NULL DEFAULT 0;"
+                           "PRAGMA user_version=2;COMMIT;")

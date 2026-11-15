@@ -31,9 +31,16 @@ def test_proprietary_needs_matching_unexpired_grant():
 
 
 def test_sensitive_raw_never_leaves_but_declassified_text_can():
-    g = Grant("g2", frozenset({"clean"}), frozenset({"provider-a"}), "diagnose", expires_at=2000)
+    ordinary = Grant("g0", frozenset({"raw", "clean"}), frozenset({"provider-a"}), "x", expires_at=2000)
+    g = Grant("g2", frozenset({"clean"}), frozenset({"provider-a"}), "diagnose", expires_at=2000,
+              declassified=True)
+    # an ordinary grant, even one naming the exact hash, never releases sensitive-origin content
+    assert pd([lab(RepoClass.SENSITIVE, h="raw")], [ordinary], DESTS, NOW) == {LOCAL}
+    assert pd([lab(RepoClass.SENSITIVE, h="clean")], [ordinary], DESTS, NOW) == {LOCAL}
     assert pd([lab(RepoClass.SENSITIVE, h="raw")], [g], DESTS, NOW) == {LOCAL}
     assert pd([lab(RepoClass.SENSITIVE, h="clean")], [g], DESTS, NOW) == {LOCAL, "provider-a"}
+    # a declassified grant still works as a normal grant for proprietary content
+    assert pd([lab(RepoClass.PROPRIETARY, h="clean")], [g], DESTS, NOW) == {LOCAL, "provider-a"}
 
 
 def test_payload_is_intersection_of_its_artefacts():

@@ -19,3 +19,18 @@ def test_newer_schema_is_refused(tmp_path):
     c.close()
     with pytest.raises(RuntimeError):
         db.connect(p)
+
+
+def test_v1_store_migrates_to_v2(tmp_path):
+    import sqlite3
+    from importlib import resources
+    p = tmp_path / "old.sqlite"
+    raw = sqlite3.connect(p)
+    raw.executescript(resources.files("hera.store").joinpath("schema.sql").read_text(encoding="utf-8"))
+    raw.execute("INSERT INTO grants(id,content_hashes_json,destinations_json,purpose,expires_at,created_at)"
+                " VALUES('g','[]','[]','x',1,1)")
+    raw.execute("PRAGMA user_version=1")
+    raw.commit(); raw.close()
+    c = db.connect(p)
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert c.execute("SELECT declassified FROM grants WHERE id='g'").fetchone()[0] == 0

@@ -94,6 +94,7 @@ class Grant:
     destinations: frozenset[str]
     purpose: str
     expires_at: float                       # unix seconds
+    declassified: bool = False              # user read and approved this exact text as sanitized
 
 
 @dataclass
