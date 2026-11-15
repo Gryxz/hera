@@ -54,3 +54,12 @@ def test_derive_unknown_or_empty_inputs_unlabelled(conn, tmp_path):
     assert derive(s, artefact_id="x", inputs=["a", "ghost"], data=b"z").repo_class is None
     assert derive(s, artefact_id="y", inputs=[], data=b"z").repo_class is None
     assert s.get("y").repo_class is None
+
+
+def test_label_builtin_is_public_and_marked(conn):
+    from hera.privacy.labels import label_builtin
+    s = LabelStore(conn)
+    lab = label_builtin(s, artefact_id="tpl", data=b"static prompt")
+    assert lab.repo_class is RepoClass.PUBLIC and lab.restricted_findings == ()
+    assert lab.derived_from == ("hera-builtin",) and lab.content_hash == content_hash(b"static prompt")
+    assert s.get("tpl") == lab
