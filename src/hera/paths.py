@@ -21,8 +21,12 @@ def checks_dir() -> Path:
     return hera_home() / "checks"
 
 
+def work_dir() -> Path:
+    return hera_home() / "work"
+
+
 def ensure_layout() -> Path:
     home = hera_home()
-    for p in (home, policy_dir(), checks_dir(), home / "artifacts", home / "logs"):
+    for p in (home, policy_dir(), checks_dir(), home / "artifacts", home / "logs", work_dir()):
         p.mkdir(parents=True, exist_ok=True)
     return home
