@@ -50,4 +50,5 @@ class PrivacyGate(Protocol):
 
 class EgressGateway(Protocol):
     """The only component allowed to open a network connection or hold an API key."""
-    def send(self, destination: str, payload: bytes, purpose: str, labels: Sequence[Label]): ...
+    def send(self, destination_name: str, segments: Sequence, *, purpose: str,
+             task_id: str | None = None, envelope=None): ...

@@ -6,8 +6,9 @@ Rules (architecture §P):
 - public        → every configured destination.
 - personal / proprietary → only destinations named by an unexpired grant bound to the
                            artefact's exact content hash.
-- sensitive     → nothing remote for raw content; a declassified text is a *new* artefact
-                  whose hash carries its own grant (same rule as above).
+- sensitive     → nothing remote, whatever ordinary grants exist. Only a grant marked
+                  `declassified` (the user read and approved that exact sanitized text)
+                  can release a sensitive-origin artefact, and only that exact content.
 - A payload's permitted set is the intersection over all its artefacts.
 """
 from __future__ import annotations
@@ -23,8 +24,11 @@ def _for_label(label: Label, grants: list[Grant], destinations: set[str], now: f
     if label.repo_class is RepoClass.PUBLIC:
         return set(destinations)
     allowed: set[str] = set()
+    sensitive = label.repo_class is RepoClass.SENSITIVE
     if label.content_hash:
         for g in grants:
+            if sensitive and not g.declassified:
+                continue                 # an ordinary grant never releases sensitive-origin content
             if g.expires_at > now and label.content_hash in g.content_hashes:
                 allowed |= set(g.destinations)
     return allowed & destinations

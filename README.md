@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 53 tests should pass
+pytest -q                       # 56 tests should pass
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -57,7 +57,7 @@ Python 3.11 or newer. The core has **no third-party dependencies**; keep it that
 
 Around that loop:
 
-- **Privacy gate, before any routing.** Every piece of data has a label. Public repositories may go to any provider. Personal or proprietary code needs an explicit approval bound to its exact content, a destination and an expiry. Sensitive repositories never leave; only text you approved as sanitized can. Anything unlabelled or uncertain is blocked.
+- **Privacy gate, before any routing.** Every piece of data has a label. Public repositories may go to any provider. Personal or proprietary code needs an explicit approval bound to its exact content, a destination and an expiry. Sensitive repositories never leave; only text you read and approved as sanitized can, through an approval marked `declassified` — an ordinary approval never releases sensitive content. Anything unlabelled or uncertain is blocked.
 - **One egress gateway.** The only component allowed to hold API keys or open a connection. Every send or block is written to a hash-chained log.
 - **Cost ledger.** Every model call is priced and recorded. Caps: $3 per task, $4 per day, $45 per month (10% held in reserve), strong models at most 35% of the month.
 - **Model tiers.** `local` (a 9B model on your own machine, private and free) · `cheap` · `default` (does most implementation) · `strong` (writes checks, diagnoses, escalations).
@@ -81,7 +81,7 @@ Around that loop:
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
 | `src/hera/cli.py` | `hera init`, `hera status` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks | 53 passing |
+| `tests/` | One test file per module, plus portability checks | 56 passing |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
 Not built yet: scanners, provider adapters, local model host, sandbox and worktrees, check authoring and verification, agent loop, recovery, attribution.

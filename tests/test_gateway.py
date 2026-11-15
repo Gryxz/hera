@@ -167,3 +167,20 @@ def test_transport_error_does_not_raise(conn):
     r = e.gw.send("prov", [e.label("a", "pub", b"x")], purpose="p")
     assert not r.sent and r.reason.startswith("transport error")
     assert e.rows()[-1]["decision"] == "sent"        # bytes may have left; record stays
+
+
+def test_sensitive_content_needs_a_declassified_grant(env, sink):
+    """A grant naming the exact hash of sensitive content does not release it unless the user
+    marked that exact text as declassified."""
+    raw = env.label("s-raw", "sens", b"raw sensitive bytes")
+    env.grants.create(content_hashes={content_hash(raw.data)}, destinations={"prov"},
+                      purpose="x", expires_at=2000)
+    assert env.gw.send("prov", [raw], purpose="implement").sent is False
+    assert sink[1] == []
+    clean = env.label("s-clean", "sens", b"generic question, approved by the user")
+    env.grants.create(content_hashes={content_hash(clean.data)}, destinations={"prov"},
+                      purpose="diagnose", expires_at=2000, declassified=True)
+    assert env.gw.send("prov", [clean], purpose="diagnose").sent is True
+    assert sink[1] == [clean.data]
+    assert env.gw.send("prov", [raw], purpose="implement").sent is False     # raw still blocked
+    assert translog.verify(env.conn) == (True, None)
