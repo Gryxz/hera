@@ -178,6 +178,10 @@ def _sbpl_profile(*, cwd: str, tmp: str, read_only: Sequence[str], writable: Seq
         '(allow file-write* (literal "/dev/null") (literal "/dev/zero") '
         '(literal "/dev/dtracehelper"))',
         "(deny file-read-data " + " ".join(f"(subpath {_sb(r)})" for r in deny_roots) + ")",
+        # Seatbelt looks up rules for the specific operation first and falls back to the
+        # wildcard only when none match, so the exceptions to a file-read-data deny must be
+        # file-read-data allows; a file-read* allow alone is never consulted.
+        "(allow file-read-data " + " ".join(f"(subpath {_sb(p)})" for p in readable) + ")",
         "(allow file-read* " + " ".join(f"(subpath {_sb(p)})" for p in readable) + ")",
     ]
     # getcwd() and path resolution read the directories ABOVE an allowed path. Allow each
