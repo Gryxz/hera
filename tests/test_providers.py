@@ -353,3 +353,61 @@ def test_remote_destination_must_use_https(conn):
             Gateway(conn, labels, grants, {"p": Destination("p", url, {})})
     Gateway(conn, labels, grants, {"p": Destination("p", "https://api.provider.example/v1/chat", {})})
     Gateway(conn, labels, grants, {"p": Destination("p", "http://127.0.0.1:9/v1/chat", {})})
+
+
+# ---- Grok (xAI): OpenAI-compatible with three differences
+
+def _grok(env):
+    from hera.providers import GrokProvider
+    return GrokProvider("prov", "cheap", "grok-test", env.gw, env.ledger)
+
+
+def test_grok_request_shape(env, mock):
+    mock.json(choices=[{"message": {"content": "ok"}}],
+              usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12})
+    _grok(env).complete([env.msg("system", "s", "be brief"), env.msg("user", "u", "hi")],
+                        max_tokens=64, stop=["END"], reasoning_effort="low")
+    body = json.loads(mock.bodies[0])
+    assert body["max_completion_tokens"] == 64 and "max_tokens" not in body
+    assert "stop" not in body and body["reasoning_effort"] == "low" and body["stream"] is False
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
+
+
+def test_grok_reasoning_tokens_outside_completion_are_billed(env, mock):
+    # reasoning reported separately: total = prompt + completion + reasoning
+    mock.json(choices=[{"message": {"content": "303"}}],
+              usage={"prompt_tokens": 100, "completion_tokens": 14, "total_tokens": 424,
+                     "completion_tokens_details": {"reasoning_tokens": 310}})
+    reply = _grok(env).complete([env.msg("user", "u", "q")], max_tokens=500)
+    assert reply.usage.output_tokens == 324
+    assert env.calls()[0]["usd"] == pytest.approx((100 * 1.0 + 324 * 4.0) / 1e6)
+
+
+def test_grok_reasoning_tokens_already_included_are_not_double_counted(env, mock):
+    mock.json(choices=[{"message": {"content": "x"}}],
+              usage={"prompt_tokens": 100, "completion_tokens": 324, "total_tokens": 424,
+                     "completion_tokens_details": {"reasoning_tokens": 310}})
+    assert _grok(env).complete([env.msg("user", "u", "q")], max_tokens=500).usage.output_tokens == 324
+
+
+def test_grok_ambiguous_total_overcounts_rather_than_undercounts(env, mock):
+    mock.json(choices=[{"message": {"content": "x"}}],
+              usage={"prompt_tokens": 100, "completion_tokens": 14,
+                     "completion_tokens_details": {"reasoning_tokens": 310}})
+    assert _grok(env).complete([env.msg("user", "u", "q")], max_tokens=500).usage.output_tokens == 324
+
+
+def test_grok_goes_through_the_same_privacy_and_cache_rules(env, mock):
+    mock.json(choices=[{"message": {"content": "x"}}],
+              usage={"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55,
+                     "prompt_tokens_details": {"cached_tokens": 40}})
+    reply = _grok(env).complete([env.msg("user", "u", "q")], max_tokens=10)
+    assert reply.usage.cache_read_tokens == 40 and reply.usage.input_tokens == 10
+    with pytest.raises(ProviderBlocked):
+        _grok(env).complete([env.msg("user", "nolabel", "secret-ish", label=False)], max_tokens=10)
+    assert len(mock.bodies) == 1                      # the blocked call never reached the server
+
+
+def test_grok_url_constant_is_https():
+    from hera.providers import GROK_CHAT_URL
+    assert GROK_CHAT_URL == "https://api.x.ai/v1/chat/completions"
