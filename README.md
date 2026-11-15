@@ -4,7 +4,7 @@ A coordinator that gets coding tasks done by AI models and only calls them done 
 
 Private project for a group of four. Each member runs their own copy.
 
-> **Status: milestone 0.1, step 1 of 10 is done (foundations).** Nothing here calls a model, reads a repository or opens a network connection yet. Next up is step S2. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+> **Status: milestone 0.1, step 2 of 10 is done (foundations, egress gateway and labeller; S2 pending review).** Nothing here calls a model or reads a repository yet; the egress gateway is the only code that can open a network connection and is exercised against a loopback server only. Next up is step S3. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ---
 
@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 26 tests should pass
+pytest -q                       # 53 tests should pass
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -72,21 +72,25 @@ Around that loop:
 | `src/hera/ledger.py` | Cost ledger and spending caps | done |
 | `src/hera/privacy/gate.py` | Which destinations a payload may go to — from labels and approvals only | done (decision logic) |
 | `src/hera/privacy/translog.py` | Hash-chained transmission log; stores metadata and a hash, never the payload | done |
+| `src/hera/privacy/policy.py` | Loads the local policy file; repository classes (no entry means sensitive) | done |
+| `src/hera/privacy/labels.py` | Artefact labels, content hashes, strictest-class derivation | done |
+| `src/hera/privacy/grants.py` | Approval store (hash-bound, destination-bound, expiring); local user command only | done |
+| `src/hera/privacy/gateway.py` | The only network client; fail-closed; logs every send and block | done |
 | `src/hera/oracle/verdict.py` | Verdict as a pure function of a verification receipt | done |
 | `src/hera/types.py` | Shared data types and enums | done |
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
 | `src/hera/cli.py` | `hera init`, `hera status` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks | 26 passing |
+| `tests/` | One test file per module, plus portability checks | 53 passing |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
-Not built yet: egress gateway, scanners, provider adapters, local model host, sandbox and worktrees, check authoring and verification, agent loop, recovery, attribution.
+Not built yet: scanners, provider adapters, local model host, sandbox and worktrees, check authoring and verification, agent loop, recovery, attribution.
 
 ## Rules — please do not break these
 
 1. **Core is standard library only.** Third-party packages go at the edges, behind an interface in `interfaces.py` (model host, scanners, test-runner adapters).
 2. **No machine-specific paths.** Everything lives under `HERA_HOME` via `hera/paths.py`. A test enforces this.
-3. **Only the egress gateway touches the network or API keys.** No other module may import `urllib`, `http`, `socket`, `requests` or a vendor SDK. Step S2 adds a test that enforces it.
+3. **Only the egress gateway touches the network or API keys.** No other module may import `urllib`, `http`, `socket`, `requests` or a vendor SDK. `tests/test_network_isolation.py` enforces it.
 4. **Default-deny.** When a label is missing, a scanner fails, or anything is uncertain, block. Never "send and warn".
 5. **No model is in the privacy or verdict path.** Those are plain deterministic code. Model output is data, never a policy decision, and a model's opinion never changes a verdict.
 6. **The implementer never edits or sees more than it should.** Checks are frozen before implementation; hidden checks are never mounted in an implementer workspace; feedback on hidden failures names the requirement only.
@@ -104,22 +108,23 @@ Not built yet: egress gateway, scanners, provider adapters, local model host, sa
 - Commit messages: what changed and why, in plain sentences.
 - One build-plan step per pull request where practical; update the step's status in `docs/BUILD_PLAN.md` in the same pull request.
 
-## Next step: S2 — egress gateway and labeller
+## Next step: S3 — scanners v0
 
 Build:
-- `hera/privacy/labels.py` — label an artefact from the local policy file (repository class), its content hash and what it was derived from; derived artefacts take the strictest label of their inputs.
-- `hera/privacy/policy.py` — load `HERA_HOME/policy/policy.toml`; a repository with no entry is `sensitive`.
-- `hera/privacy/grants.py` — create, store and look up approvals (content hashes, destinations, purpose, expiry). Created only by a local user command.
-- `hera/privacy/gateway.py` — the single network client. For each payload: every segment must reference a labelled artefact; call `gate.permitted_destinations`; block on missing label, unknown destination, oversize or any error; write a `sent` or `blocked` record with `translog.append`; only then send.
+- Secret patterns and entropy checks.
+- Structural detectors: email, phone, address shape, order / tracking / payment formats.
+- A field-combination rule (several weak signals together become a finding).
+- Deny-list terms with a match mode and an action, loaded from the local policy file (`policy.py` already loads `[[term]]` entries).
+- A block notice that never echoes a term.
 
-Done when:
-- Tests against a local loopback server show: unlabelled text is blocked; raw content from a sensitive repository is blocked; editing an approved file invalidates its approval; a blocked request is logged with a reason.
-- A static test proves no module other than the gateway imports a network library.
+Scanners plug into the gateway as `bytes -> list[str]` callables returning finding names only.
+
+Done when a seeded-corpus test reports recall and false-block rate per category, with known misses listed rather than hidden.
 
 ## Known gaps and honest caveats
 
 - Tests have run on Linux with Python 3.13 only. macOS and 3.11 run in CI on the first push.
-- The privacy gate decides correctly only if labels are right. Labelling and scanning (S2, S3) are not built.
+- The privacy gate decides correctly only if labels are right. Labelling is built (S2); scanning (S3) is not.
 - Automated secret and personal-data detection will never be complete. The design relies on default-deny classification first; scanners are a second line.
 - Spending caps and prices in the example config are first values, not measurements.
 - Running one model across several machines is a later milestone and is unmeasured for the models in question.
