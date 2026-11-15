@@ -180,11 +180,28 @@ def _sbpl_profile(*, cwd: str, tmp: str, read_only: Sequence[str], writable: Seq
         "(deny file-read-data " + " ".join(f"(subpath {_sb(r)})" for r in deny_roots) + ")",
         "(allow file-read* " + " ".join(f"(subpath {_sb(p)})" for p in readable) + ")",
     ]
+    # getcwd() and path resolution read the directories ABOVE an allowed path. Allow each
+    # ancestor as a literal (the directory itself, not its contents): names of siblings become
+    # listable, their contents stay unreadable.
+    ancestors = _ancestors(readable)
+    if ancestors:
+        lines.append("(allow file-read-data " + " ".join(f"(literal {_sb(a)})" for a in ancestors)
+                     + ")")
     final_deny = _drop_allowed(_default_deny(deny_read), [*read_only, *writable, cwd, tmp])
     if final_deny:
         lines.append("(deny file-read-data " + " ".join(f"(subpath {_sb(p)})" for p in final_deny)
                      + ")")
     return "\n".join(lines) + "\n"
+
+
+def _ancestors(paths: Sequence[str]) -> list[str]:
+    out: dict[str, None] = {}
+    for p in paths:
+        parent = os.path.dirname(p.rstrip("/"))
+        while parent and parent != "/":
+            out.setdefault(parent)
+            parent = os.path.dirname(parent)
+    return [a for a in out if a not in paths]
 
 
 # ---- Linux: bubblewrap ------------------------------------------------------------------

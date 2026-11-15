@@ -70,7 +70,8 @@ def test_env_scrub(tmp_path, monkeypatch):
     assert env["PYTHONDONTWRITEBYTECODE"] == "1" and env["PYTHONHASHSEED"] == "0"
     assert env["LC_ALL"] == "C.UTF-8" and os.path.dirname(PY) in env["PATH"].split(os.pathsep)
     assert set(env) <= {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "PYTHONDONTWRITEBYTECODE",
-                        "PYTHONHASHSEED", "EXPLICIT", "LC_CTYPE"}
+                        "PYTHONHASHSEED", "EXPLICIT", "LC_CTYPE",
+                        "__CF_USER_TEXT_ENCODING"}      # macOS adds this one itself
     assert not os.path.exists(env["HOME"])                   # private temp dir is removed afterwards
 
 
