@@ -40,7 +40,7 @@ false-block rate on benign: 2/63 = 0.032
 Reading the table honestly:
 
 - Only plain recall (>= 0.90 per category), base64 / URL-encoded / unicode-escaped / zero-width recall for secrets (>= 0.75) and the benign false-block rate (<= 0.10) are asserted. Every other cell is recorded, not tuned for.
-- The decode pass exists for secrets only. An email, phone number, address or card number in base64 or percent-encoding is not found (0.00 columns).
+- Structured-content and deny-list term scanners do not decode: a database dump or a deny-list term inside base64 or percent-encoding is not found (0.00 columns). Protection there rests on labels, not detection.
 - The `entropy` row survives reversal, ROT13 and gzip+base64 only because any long random-looking token trips the entropy rule; the named formats in `secret_formats` do not survive them. Entropy is a generic catch, not an identification.
 - The `spaced` and `leet` columns apply to `terms` only and only the `fuzzy` terms (3 of 12) can match them.
 - Two benign samples are false blocks, kept in the corpus on purpose: a long file path and a base64 string of ordinary prose both trip `secret:high_entropy`. Expect similar noise from data URIs and long encoded identifiers.
