@@ -57,3 +57,9 @@ process group is killed with SIGKILL) and a per-stream output cap.
   write to. The hardening above removes the known execution paths, but a new git feature could open
   another one.
 - For milestone 0.2 the verifier should move to a per-run VM or container.
+
+## Verified in CI
+
+Both real mechanisms run in CI on every push: `sandbox-exec` on the macOS runners and `bwrap` on the Ubuntu runners (after lifting the runner's restriction on unprivileged user namespaces). The isolation tests — no network, no writes outside the working directory, no reads of denied paths, sibling worktrees or the check store — pass under both.
+
+One macOS limit found while getting there: for path resolution to work, the directories above an allowed path are readable as directories. A sandboxed process on macOS can therefore list the names of sibling entries in those ancestor directories; it still cannot read their contents.
