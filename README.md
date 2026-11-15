@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 293 tests should pass
+pytest -q                       # 295 tests should pass
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -83,7 +83,7 @@ Around that loop:
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
 | `src/hera/cli.py` | `hera init`, `hera status` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks | 293 passing |
+| `tests/` | One test file per module, plus portability checks | 295 passing |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
 Not built yet: local model host, sandbox and worktrees, check authoring and verification, agent loop, recovery, attribution.

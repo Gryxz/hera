@@ -49,3 +49,9 @@ the cost (input at 4 bytes per token plus `max_tokens` of output), asks the ledg
 the real usage. A refusal raises `ProviderBlocked`; an HTTP error or unparseable reply raises
 `ProviderError` (an unparseable reply also leaves a zero-usage `:unparsed` ledger row). If a reply
 carries no usage, `reply.usage_reported` is `False` and zero is recorded, so check that flag.
+
+## Rules enforced in code
+
+- A remote destination must use `https`. Plain `http` is accepted only for loopback addresses.
+- The `local` tier is free and exempt from spending caps, so a provider on the `local` tier must point at a destination marked `local` (a loopback address), and the reverse.
+- If a paid provider's reply carries no token usage, the call is recorded with a size-based estimate and its purpose is suffixed `:estimated`. It is never recorded as free.

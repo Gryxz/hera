@@ -155,8 +155,10 @@ def test_openai_tool_calls_and_null_content(env, mock):
 def test_openai_missing_usage(env, mock):
     mock.json(choices=[{"message": {"content": "x"}}])
     reply = env.openai().complete([env.msg("user", "u", "q")], max_tokens=10)
-    assert reply.usage_reported is False and reply.usage.input_tokens == 0
-    assert env.calls()[0]["usd"] == 0
+    # a paid call is never recorded as free: size-based estimate, marked as such
+    assert reply.usage_reported is False and reply.usage.input_tokens > 0
+    row = env.calls()[0]
+    assert row["usd"] > 0 and row["purpose"].endswith(":estimated")
 
 
 def test_builtin_label_is_public(env, mock):
@@ -330,3 +332,24 @@ def test_api_key_never_reaches_logs_ledger_or_errors(conn, mock):
         dump += str(exc) + repr(exc)
     assert KEY not in dump and "invented-key" not in dump
     assert KEY in repr(mock.headers)          # sanity: the key really was sent to the server
+
+
+def test_local_tier_requires_loopback_destination_and_vice_versa(conn, mock):
+    remote = Env(conn, mock)                       # destination not marked local
+    with pytest.raises(ValueError):
+        remote.openai(tier="local")                # would be free and uncapped while leaving the machine
+    local = Env(conn, mock, local=True)
+    with pytest.raises(ValueError):
+        local.openai(tier="cheap")
+    local.openai(tier="local")                     # the matching pair is accepted
+    with pytest.raises(ValueError):
+        OpenAICompatProvider("nowhere", "cheap", "m", remote.gw, remote.ledger)
+
+
+def test_remote_destination_must_use_https(conn):
+    labels, grants = LabelStore(conn), GrantStore(conn)
+    for url in ("http://api.provider.example/v1/chat", "http://192.168.1.20:8080/v1/chat"):
+        with pytest.raises(ValueError):
+            Gateway(conn, labels, grants, {"p": Destination("p", url, {})})
+    Gateway(conn, labels, grants, {"p": Destination("p", "https://api.provider.example/v1/chat", {})})
+    Gateway(conn, labels, grants, {"p": Destination("p", "http://127.0.0.1:9/v1/chat", {})})

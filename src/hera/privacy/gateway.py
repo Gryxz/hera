@@ -89,6 +89,10 @@ class Gateway:
         for d in self.destinations.values():
             if d.local and not is_loopback_url(d.url):
                 raise ValueError(f"destination {d.name!r} is marked local but its URL is not loopback")
+            if (not d.local and d.url.lower().startswith("http://")
+                    and not is_loopback_url(d.url)):
+                # a key or payload must never travel in cleartext to another machine
+                raise ValueError(f"destination {d.name!r} is remote and must use https")
         self.max_payload_bytes = max_payload_bytes
         self.scanners = tuple(scanners)
         self.blocking = blocking          # default: every finding blocks

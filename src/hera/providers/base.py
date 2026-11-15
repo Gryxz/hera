@@ -63,6 +63,12 @@ class BaseProvider:
         self.name, self.tier, self.model_id = name, tier, model_id
         self.gateway, self.ledger = gateway, ledger
         self.destination_name = destination_name or name
+        dest = gateway.destinations.get(self.destination_name)
+        if dest is None:
+            raise ValueError(f"unknown destination {self.destination_name!r}")
+        # the "local" tier is free and exempt from caps, so it must really be this machine
+        if (tier == "local") != bool(dest.local):
+            raise ValueError("tier 'local' and a loopback destination must go together")
 
     # -- subclass hooks
     def _build(self, messages: Sequence[Message], max_tokens: int, tools: Sequence,
@@ -99,6 +105,10 @@ class BaseProvider:
             if isinstance(e, ProviderError):
                 raise
             raise ProviderError("malformed provider response", status=result.status) from None
+        if not reply.usage_reported and self.tier != "local":
+            # never record a paid call as free: fall back to a size-based estimate and say so
+            reply.usage = Usage(input_tokens=len(body) // 4, output_tokens=max(1, len(reply.text) // 4))
+            purpose = f"{purpose}:estimated"
         self.ledger.record(tier=self.tier, usage=reply.usage, task_id=task_id, purpose=purpose,
                            destination=self.destination_name,
                            model_id=reply.model_id or self.model_id)
