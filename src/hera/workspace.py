@@ -390,6 +390,45 @@ class TaskRepo:
         if real.exists():
             _rm_tree(real)
 
+    # ---- reading a tree ------------------------------------------------------------
+    def read_tree(self, commit: str, select=None, *, max_total_bytes: int = 64 * 1024 * 1024
+                  ) -> dict[str, bytes]:
+        """Map path -> raw blob bytes for the regular files of ``commit``'s tree.
+
+        ``select`` is an optional predicate on the POSIX path; only selected files are read.
+        Symlinks and submodules are skipped. Raw blobs are read with plumbing (``ls-tree``,
+        ``cat-file --batch``): no attributes, filters or conversions apply.
+        """
+        commit = self._require_commit(commit)
+        out = self._g(["ls-tree", "-r", "-z", "--full-tree", commit]).stdout
+        wanted: list[tuple[str, bytes]] = []
+        for rec in out.split(b"\0"):
+            if not rec:
+                continue
+            meta, _, rel = rec.partition(b"\t")
+            mode, _typ, sha = meta.decode().split(" ")
+            path = os.fsdecode(rel)
+            if mode not in ("100644", "100755") or (select is not None and not select(path)):
+                continue
+            wanted.append((path, sha.encode()))
+        if not wanted:
+            return {}
+        r = self._g(["cat-file", "--batch"], input=b"".join(sha + b"\n" for _p, sha in wanted))
+        data, pos, total = r.stdout, 0, 0
+        result: dict[str, bytes] = {}
+        for path, _sha in wanted:
+            nl = data.index(b"\n", pos)
+            header = data[pos:nl].split()
+            if len(header) != 3 or header[1] != b"blob":
+                raise WorkspaceError("unexpected output from git cat-file")
+            size = int(header[2])
+            total += size
+            if total > max_total_bytes:
+                raise WorkspaceError("tree is larger than the allowed size")
+            result[path] = data[nl + 1: nl + 1 + size]
+            pos = nl + 1 + size + 1
+        return result
+
     # ---- diffs ---------------------------------------------------------------------
     def _diff_tree(self, base: str, commit: str, *flags: str) -> bytes:
         base, commit = self._require_commit(base), self._require_commit(commit)
