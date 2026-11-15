@@ -26,12 +26,12 @@ RECALL per (category, transformation); n = samples per cell
 category         n plain base64 urlenc unicode_escape zero_width spaced leet reversed split_concat rot13  hex gzip_b64
 secret_formats  13  1.00   1.00   1.00           1.00       1.00    n/a  n/a     0.00         0.00  0.00 0.00     0.00
 entropy         10  1.00   1.00   1.00           1.00       1.00    n/a  n/a     1.00         0.00  1.00 0.00     1.00
-email            9  1.00   0.00   0.00           0.00       1.00    n/a  n/a     0.22         0.00  1.00 0.00     0.00
-phone           10  1.00   0.00   0.00           0.00       1.00    n/a  n/a     0.00         0.00  1.00 0.00     0.00
-address         10  1.00   0.00   0.00           0.00       1.00    n/a  n/a     0.00         0.00  0.00 0.00     0.00
-card             8  1.00   0.00   0.00           0.00       1.00    n/a  n/a     0.25         0.00  1.00 0.00     0.00
-tracking         9  1.00   0.00   0.00           0.00       1.00    n/a  n/a     0.00         0.00  0.44 0.00     0.00
-order_id         8  1.00   0.00   0.00           0.00       1.00    n/a  n/a     0.00         0.00  0.00 0.00     0.00
+email            9  1.00   1.00   1.00           1.00       1.00    n/a  n/a     0.22         0.00  1.00 0.00     0.00
+phone           10  1.00   1.00   1.00           1.00       1.00    n/a  n/a     0.00         0.00  1.00 0.00     0.00
+address         10  1.00   1.00   1.00           1.00       1.00    n/a  n/a     0.00         0.00  0.00 0.00     0.00
+card             8  1.00   1.00   1.00           1.00       1.00    n/a  n/a     0.25         0.00  1.00 0.00     0.00
+tracking         9  1.00   1.00   1.00           1.00       1.00    n/a  n/a     0.00         0.00  0.44 0.00     0.00
+order_id         8  1.00   1.00   1.00           1.00       1.00    n/a  n/a     0.00         0.00  0.00 0.00     0.00
 structured      12  1.00   0.00   0.00           0.00       0.08    n/a  n/a     0.00         0.00  0.08 0.00     0.00
 terms           12  1.00   0.00   0.00           0.00       1.00   0.25 0.25     0.00         0.00  0.00 0.00     0.00
 false-block rate on benign: 2/63 = 0.032
@@ -57,3 +57,5 @@ Defined in `tests/test_scanners_corpus.py`; recall for these is recorded and not
 - `gzip_b64`: compressed content is not decompressed, even one layer down.
 
 Also not detected: more than one level of encoding; random hex secrets of 32/40/64 characters (they look like hashes); short or low-entropy secrets without a known prefix or an assignment label; names and free-text personal data; non-North-American addresses without a postal code near a keyword; text inside binary formats or archives (an archive is reported as `data:archive`, its contents are not read).
+
+Personal-data detection also runs on one level of base64, URL and escape decoding, the same pass the secret scanner uses. Structured-content and deny-list term scanners do not decode.

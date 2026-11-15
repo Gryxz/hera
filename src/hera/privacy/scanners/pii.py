@@ -116,8 +116,7 @@ def _has_order_id(text: str) -> bool:
     return False
 
 
-def scan_pii(data: bytes) -> list[str]:
-    text = to_text(data)
+def _scan_text(text: str) -> list[str]:
     found: list[str] = []
     if any(_real_email_domain(m.group(1)) for m in _EMAIL.finditer(text)):
         found.append("pii:email")
@@ -131,12 +130,27 @@ def scan_pii(data: bytes) -> list[str]:
         found.append("pii:tracking_number")
     if _has_order_id(text):
         found.append("pii:order_id")
+    return found
+
+
+def scan_pii(data: bytes) -> list[str]:
+    """Plain text, plus one level of base64 / URL / escape decoding (same pass as the secret scanner)."""
+    from .secrets import _base64_decoded, _unescaped      # local import: avoids a module cycle
+    text = to_text(data)
+    found = _scan_text(text)
+    layers = _base64_decoded(text)
+    unescaped = _unescaped(text)
+    if unescaped != text:
+        layers.append(unescaped)
+    for layer in layers:
+        found.extend(f"{n} (decoded)" for n in _scan_text(layer) if n not in found)
     return unique(found)
 
 
 def field_combination(findings: list[str]) -> list[str]:
     """Several weak personal-data signals together become one more finding."""
-    kinds = {f for f in findings if f.startswith("pii:") and f != "pii:combination"}
+    kinds = {f.removesuffix(" (decoded)") for f in findings
+             if f.startswith("pii:") and f != "pii:combination"}
     return ["pii:combination"] if len(kinds) >= 2 else []
 
 
