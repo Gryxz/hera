@@ -110,7 +110,10 @@ class ProviderError(Exception):
 
 
 def estimate_usd(price: TierPrice, payload_bytes: int, max_tokens: int) -> float:
-    return (payload_bytes / 4 * price.input + max_tokens * price.output) / 1e6
+    """Pre-call estimate used for the cap check. Code and JSON tokenise at roughly 3 bytes per
+    token, not the 4 typical of prose, so 3 is used: over-estimating stops a call early, while
+    under-estimating lets a cap be overshot by one call."""
+    return (payload_bytes / 3 * price.input + max_tokens * price.output) / 1e6
 
 
 def _error_message(body: bytes) -> str:
