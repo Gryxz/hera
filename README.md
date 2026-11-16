@@ -4,7 +4,7 @@ A coordinator that gets coding tasks done by AI models and only calls them done 
 
 Private project for a group of four. Each member runs their own copy.
 
-> **Status: milestone 0.1, step 6 of 10 is done (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox); S5 (local model host) is deferred until someone has a Mac, and S4 and S6 are pending review.** Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can open a network connection and the provider adapters are exercised against loopback mock servers only. Next up is step S7. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+> **Status: milestone 0.1, step 7a of 10 is done (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox, and the first half of the acceptance oracle: checks, frozen check store, pytest adapter and check validation); S5 (local model host) is deferred until someone has a Mac, and S4 and S7a are pending review.** Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can open a network connection and the provider adapters are exercised against loopback mock servers only. Next up is step S7b. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ---
 
@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 352 tests; 6 skip where no sandbox mechanism is available
+pytest -q                       # 461 tests; 7 skip where no sandbox mechanism is available
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -82,14 +82,18 @@ Around that loop:
 | `src/hera/workspace.py` | Bare repository per task, worktree per candidate, verification checkout from a commit hash with no `.git`; hardened git | done |
 | `src/hera/sandbox.py` | Run candidate code with no network, scrubbed environment, limits and a narrow filesystem (`sandbox-exec` / `bwrap`); see `docs/SANDBOX.md` | done (macOS path untested by author) |
 | `src/hera/oracle/verdict.py` | Verdict as a pure function of a verification receipt | done |
+| `src/hera/oracle/model.py` | Requirement, draft check, check set, prepare and run reports | done |
+| `src/hera/oracle/checkstore.py` | Frozen, hashed, read-only check store (visible and hidden), integrity check, supersede; see `docs/ORACLE.md` | done |
+| `src/hera/oracle/adapters/` | pytest adapter: protected-path restoration, sentinels, JUnit parsing, redacted feedback | done (Python only; same interpreter as HERA) |
+| `src/hera/oracle/validation.py` | Validate a draft check set on the base commit (fail-before, stability) | done (no stub adversaries or mutation testing yet) |
 | `src/hera/types.py` | Shared data types and enums | done |
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
 | `src/hera/cli.py` | `hera init`, `hera status` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks | 352 (6 need a sandbox mechanism) |
+| `tests/` | One test file per module, plus portability checks and an invented toy project (`toyrepo.py`) | 461 (7 need a sandbox mechanism) |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
-Not built yet: local model host, check authoring and verification, agent loop, recovery, attribution.
+Not built yet: local model host, check authoring by models, receipts and verdict wiring (S7b), agent loop, recovery, attribution.
 
 ## Rules — please do not break these
 
@@ -113,15 +117,15 @@ Not built yet: local model host, check authoring and verification, agent loop, r
 - Commit messages: what changed and why, in plain sentences.
 - One build-plan step per pull request where practical; update the step's status in `docs/BUILD_PLAN.md` in the same pull request.
 
-## Next step: S7 — acceptance oracle
+## Next step: S7b — verdicts
 
-Build:
+Built in S7a (see [docs/ORACLE.md](docs/ORACLE.md)): check objects, frozen check store, pytest adapter, validation on the base commit. Build now:
+- Verify: fresh checkout, `prepare`, `run`, then a `Receipt` from the `RunReport` and `PrepareReport`; verdict through `hera.oracle.verdict`.
+- Diff audit from the `PrepareReport` plus declared scope, debris and twin search.
+- Redacted feedback to the implementer; disputes (`checkstore.supersede`).
 - Requirements summary and approval screen (terminal); two blind check authors.
-- Validation (fail-before, 3x stability, sentinels, stub adversaries), then freeze and hash.
-- pytest adapter; diff audit (protected paths, declared scope, debris, twin search).
-- Verify, receipt, verdict; redacted feedback; disputes.
 
-Done when, on a toy repository, a correct patch gives `PASS`, a test-editing patch `TAMPER`, a hard-coded patch `OVERFIT` and a regression `REGRESSION`.
+Done when, on the toy repository, a correct patch gives `PASS`, a test-editing patch `TAMPER`, a hard-coded patch `OVERFIT` and a regression `REGRESSION`.
 
 S5 (local model host) is deferred: its Mac part needs a Mac to run and test.
 
