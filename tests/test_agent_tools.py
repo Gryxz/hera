@@ -172,11 +172,14 @@ def test_every_file_tool_rejects_bad_paths(rig, bad):
 
 
 def test_nothing_was_written_by_rejected_writes(rig, tmp_path):
+    git_link = (rig.root / ".git").read_bytes()
     for bad in ("../escape.txt", "_hera_checks/x.py", ".git/hooks/pre-commit", ".GIT/x"):
         rig.text("write_file", path=bad, content="x")
     assert not (rig.root.parent / "escape.txt").exists()
     assert not (rig.root / "_hera_checks").exists()
-    assert not (rig.root / ".GIT").exists()
+    # ".GIT" cannot be tested with exists(): on a case-insensitive file system (macOS) it is the
+    # worktree's own ".git" link. What matters is that the link is untouched and still a file.
+    assert (rig.root / ".git").is_file() and (rig.root / ".git").read_bytes() == git_link
     assert sorted(os.listdir(rig.root)) == [".git", "calc.py", "conftest.py", "tests"]
 
 
@@ -292,8 +295,10 @@ def test_run_command_has_no_network_and_cannot_write_outside(conn, toy, tmp_path
     assert "NO NETWORK" in out and "CONNECTED" not in out and accepted == []
     outside = tmp_path / "written-by-child.txt"
     code = f"open({str(outside)!r}, 'w').write('x')"
-    out = r.text("run_command", argv=["{python}", "-c", code])
-    assert "exit code: 0" not in out and not outside.exists()
+    r.text("run_command", argv=["{python}", "-c", code])
+    # Under bwrap /tmp is a private tmpfs, so the write may "succeed" into a throwaway copy;
+    # under sandbox-exec it is denied. Either way the real file must not exist.
+    assert not outside.exists()
 
 
 # ---- visible checks -----------------------------------------------------------------------------------
