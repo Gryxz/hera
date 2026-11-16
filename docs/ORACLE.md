@@ -352,3 +352,8 @@ and mutation testing (TODO, milestone 0.2), model-written checks (needs a real p
 per-language environments (checks run with the same Python interpreter that runs HERA; building an
 environment from the project's lockfile is later), a TypeScript adapter, a per-test timeout (a hang
 loses every result of that run).
+
+## Verification without a sandbox
+
+`allow_unsandboxed=True` (CLI `--allow-unsandboxed`) exists so the test suite runs on machines with no sandbox mechanism. Under mechanism `none` nothing is isolated: a candidate can read the frozen store, including hidden contract checks, and a background process it leaves behind can tamper with later checks. Every outcome verified this way carries the note "verified WITHOUT sandbox isolation", and such a verdict must not be relied on against a hostile candidate.
+

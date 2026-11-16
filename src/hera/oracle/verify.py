@@ -423,6 +423,10 @@ def verify(conn: sqlite3.Connection, repo: TaskRepo, checkset: CheckSet, commit:
 
     # 6. verdict and attribution
     in_process_only = _in_process_only(results, {c.check_id: c.runner for c in checkset.checks})
+    if mechanism == "none":
+        notes.append("verified WITHOUT sandbox isolation: a hostile candidate could have read hidden "
+                     "checks or tampered with later checks, so this verdict is not trustworthy against "
+                     "one")
     if in_process_only:
         notes.append(f"PASS for {', '.join(in_process_only)} rests only on in-process checks, "
                      "which a candidate can forge")

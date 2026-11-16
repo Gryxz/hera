@@ -452,3 +452,11 @@ def test_feedback_does_not_carry_the_checkout_location(conn, toy, cs):
     out = run(conn, toy, cs, toy.base)
     blob = json.dumps(out.feedback) + render_feedback(out)
     assert "<checkout>" in blob and str(paths.work_dir()) not in blob and str(toy.repo.root) not in blob
+
+
+def test_unsandboxed_verification_is_marked_untrustworthy(conn, toy, cs):
+    """Whenever no isolation was used, the outcome says so, whatever the verdict."""
+    from hera import sandbox
+    out = run(conn, toy, cs, toy.candidate(CANDIDATES["correct"]))
+    flagged = any("WITHOUT sandbox isolation" in n for n in out.notes)
+    assert flagged == (out.mechanism == "none") and out.mechanism == sandbox.detect_mechanism()
