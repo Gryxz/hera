@@ -25,8 +25,9 @@ from ..workspace import TaskRepo, _check_hash
 from . import checkstore
 from .adapters.pytest_adapter import PytestAdapter
 from .audit import AuditReport, Finding, audit
+from .contract_runner import ContractRunner
 from .disputes import has_open_dispute
-from .model import CheckSet
+from .model import CheckSet, RunReport, checks_by_runner
 from .verdict import verdict as compute_verdict
 
 FEEDBACK_MAX_CHARS = 6000
@@ -104,6 +105,10 @@ class VerificationOutcome:
     advisories: tuple[AttributionRecord, ...] = ()
     notes: tuple[str, ...] = ()
     project_timed_out: bool = False
+    # Requirement ids that PASSED where every passing check is a native pytest check (no passing
+    # contract check backs them), so a candidate that forges pytest results could fake them.
+    # Shown by `hera verify` and in notes; never part of implementer feedback.
+    in_process_only: tuple[str, ...] = ()
 
 
 # ---- helpers ---------------------------------------------------------------------------
@@ -230,8 +235,29 @@ def _safe_reasons(reasons) -> list[str]:
     return out
 
 
-def _build_feedback(adapter, run, checkset, regressions, audit_report, scrub=()) -> tuple[dict, ...]:
+def _in_process_only(results, runner_of: dict[str, str]) -> tuple[str, ...]:
+    """Requirements whose counted checks all passed and none of those is a contract check."""
+    per_req: dict[str, list] = {}
+    for r in results:
+        if r.health in (CheckHealth.VALID, CheckHealth.WEAK):
+            for q in r.requirement_ids:
+                per_req.setdefault(q, []).append(r)
+    return tuple(sorted(q for q, rs in per_req.items()
+                        if all(r.status is CheckStatus.PASS for r in rs)
+                        and not any(runner_of.get(r.check_id) == "contract" for r in rs)))
+
+
+def _build_feedback(adapter, run, checkset, regressions, audit_report, scrub=(),
+                    contract_feedback=()) -> tuple[dict, ...]:
     fb: list[dict] = [dict(x) for x in adapter.feedback_for_implementer(run, checkset)]
+    seen_hidden = {tuple(x["requirement_ids"]) for x in fb if "check_id" not in x and "requirement_ids" in x}
+    for x in contract_feedback:                    # unseen failures are listed once per requirement set
+        if "check_id" not in x and "requirement_ids" in x:
+            key = tuple(x["requirement_ids"])
+            if key in seen_hidden:
+                continue
+            seen_hidden.add(key)
+        fb.append(dict(x))
     for item in fb:                      # failure text must not carry the oracle's checkout location
         if "failure_text" in item:
             for p in scrub:
@@ -308,17 +334,32 @@ def verify(conn: sqlite3.Connection, repo: TaskRepo, checkset: CheckSet, commit:
     if baseline is None:
         baseline = run_baseline(repo, adapter, allow_unsandboxed=allow_unsandboxed, limits=limits)
 
+    included = [c for c in checkset.checks if include_hidden or c.visibility == "visible"]
+    has_pytest = any(c.runner == "pytest" for c in included)
+    has_contract = any(c.runner == "contract" for c in included)
+    contract = None
     checkouts = []
     try:
         # 2. check run
         co = repo.verification_checkout(commit)
         checkouts.append(co)
         prep = adapter.prepare(co, checkset, base_tree=base_tree, include_hidden=include_hidden)
-        run = adapter.run(co, checkset, include_hidden=include_hidden, limits=limits,
-                          allow_unsandboxed=allow_unsandboxed)
+        if has_pytest:
+            run = adapter.run(co, checkset, include_hidden=include_hidden, limits=limits,
+                              allow_unsandboxed=allow_unsandboxed)
+        else:                                  # nothing in-process to run: no sentinels to fail
+            run = RunReport(sentinels_ok=True, exit_code_consistent=True, results_parsed=True)
         # 3. audit
         aud = audit(repo, base, commit, adapter, prepare_report=prep, declared_scope=declared_scope,
                     allowed_protected=tuple(allowed_protected), twin_pattern=twin_pattern)
+        # 3b. contract checks: the candidate runs in separate sandboxed subprocesses, in copies of
+        # a fresh checkout of its own; the comparison with the expectations happens here.
+        if has_contract:
+            co_c = repo.verification_checkout(commit)
+            checkouts.append(co_c)
+            adapter.prepare(co_c, checkset, base_tree=base_tree, include_hidden=False)
+            contract = ContractRunner().run(co_c, checkset, include_hidden=include_hidden, limits=limits,
+                                            allow_unsandboxed=allow_unsandboxed)
         # 4. the project's pre-existing tests, in a second fresh checkout
         project = None
         if baseline.has_tests and baseline.ok:
@@ -360,15 +401,17 @@ def verify(conn: sqlite3.Connection, repo: TaskRepo, checkset: CheckSet, commit:
 
     # 5. receipt. TIMEOUT RULE: a timed-out run cannot satisfy the sentinel or exit-code checks,
     # which is not tampering; the TIMEOUT statuses produce FAIL or OVERFIT.
-    timed_out = run.timed_out
-    included = [c for c in checkset.checks if include_hidden or c.visibility == "visible"]
+    # A timeout of the pytest run excuses only the pytest integrity flags; a timeout in a contract
+    # check yields TIMEOUT statuses and nothing else.
+    timed_out = run.timed_out or bool(contract and contract.timed_out_any)
     covered = {r for c in included for r in c.requirement_ids}
     uncovered = tuple(sorted(r.id for r in checkset.requirements if r.id not in covered))
+    raw_results = sorted([*run.results, *(contract.results if contract else ())], key=lambda r: r.check_id)
     results = tuple(CheckResult(r.check_id, r.requirement_ids, r.status, r.visibility,
                                 health.get(r.check_id, CheckHealth.VALID), 0.0, r.output_digest)
-                    for r in run.results)
-    sentinels_ok = True if timed_out else run.sentinels_ok
-    exit_ok = True if timed_out else (run.exit_code_consistent and project_consistent)
+                    for r in raw_results)
+    sentinels_ok = True if run.timed_out else run.sentinels_ok
+    exit_ok = True if run.timed_out else (run.exit_code_consistent and project_consistent)
     disputed = bool(dispute_open) or has_open_dispute(conn, repo.task_id)
     receipt = Receipt(
         task_id=repo.task_id, candidate_commit=commit, checkset_hash=checkset.hash, results=results,
@@ -379,6 +422,10 @@ def verify(conn: sqlite3.Connection, repo: TaskRepo, checkset: CheckSet, commit:
         uncovered_requirements=uncovered, dispute_open=disputed)
 
     # 6. verdict and attribution
+    in_process_only = _in_process_only(results, {c.check_id: c.runner for c in checkset.checks})
+    if in_process_only:
+        notes.append(f"PASS for {', '.join(in_process_only)} rests only on in-process checks, "
+                     "which a candidate can forge")
     v, reasons = compute_verdict(receipt)
     attribution, env_suspect, advisories = attribute(
         v, results=results, audit_report=aud, results_parsed=run.results_parsed,
@@ -391,6 +438,9 @@ def verify(conn: sqlite3.Connection, repo: TaskRepo, checkset: CheckSet, commit:
         "timed_out": timed_out, "project_timed_out": project_timed_out, "mechanism": mechanism,
         "env_hash": env_hash, "adapter": adapter.name, "include_hidden": include_hidden,
         "environment_suspect": env_suspect, "results_parsed": run.results_parsed,
+        "contract": {"ran": has_contract, "mechanism": contract.mechanism if contract else "",
+                     "timed_out": bool(contract and contract.timed_out_any)},
+        "in_process_only": list(in_process_only),
         "raw_sentinels_ok": run.sentinels_ok, "raw_exit_code_consistent": run.exit_code_consistent,
         "raw_unmatched": len(run.raw_unmatched), "notes": notes,
         "baseline": {"has_tests": baseline.has_tests, "ok": baseline.ok, "runs": baseline.runs,
@@ -405,11 +455,13 @@ def verify(conn: sqlite3.Connection, repo: TaskRepo, checkset: CheckSet, commit:
     _persist(conn, receipt, receipt_id, env_hash, stored, v, reasons, attribution, advisories)
 
     scrub = tuple(sorted({str(c) for c in checkouts} | {os.path.realpath(c) for c in checkouts}, key=len, reverse=True))
-    feedback = _build_feedback(adapter, run, checkset, regressions, aud, scrub)
+    contract_fb = ContractRunner().feedback_for_implementer(contract, checkset) if contract else []
+    feedback = _build_feedback(adapter, run, checkset, regressions, aud, scrub, contract_fb)
     return VerificationOutcome(
         receipt=receipt, receipt_id=receipt_id, verdict=v, reasons=tuple(reasons), attribution=attribution,
         audit=aud, feedback=feedback, timed_out=timed_out, environment_suspect=env_suspect,
-        mechanism=mechanism, advisories=advisories, notes=tuple(notes), project_timed_out=project_timed_out)
+        mechanism=mechanism, advisories=advisories, notes=tuple(notes), project_timed_out=project_timed_out,
+        in_process_only=in_process_only)
 
 
 def _persist(conn, receipt, receipt_id, env_hash, stored, v, reasons, attribution, advisories) -> None:

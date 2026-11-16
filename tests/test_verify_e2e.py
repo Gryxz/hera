@@ -19,8 +19,9 @@ from hera.oracle.verdict import verdict
 from hera.oracle.verify import render_feedback, run_baseline, load_receipt, verify
 from hera.sandbox import Limits
 from hera.types import Attribution as A, CheckHealth, Verdict as V
-from toyrepo import (CANDIDATES, CHECK_FILES, CHECKS, FORGE_PATCH, HARDCODED_CALC, REQUIREMENTS, VARIANT_CHECKS,
-                     VARIANT_FILES, VARIANT_REQUIREMENTS, make_toy)
+from toyrepo import (CANDIDATES, CHECK_FILES, CHECKS, CONTRACT_CHECKS, CONTRACT_FILES, FORGE_PATCH, HARDCODED_CALC,
+                     MIXED_CHECKS, MIXED_FILES, REQUIREMENTS, VARIANT_CHECKS, VARIANT_FILES, VARIANT_REQUIREMENTS,
+                     make_toy)
 
 AD = PytestAdapter()
 _BASELINE = []
@@ -218,6 +219,79 @@ def test_KNOWN_GAP_in_process_monkeypatch_yields_false_pass(conn, toy, cs):
     out = run(conn, toy, cs, commit)
     assert out.verdict is V.PASS and out.attribution is None
     assert out.audit.block == () and out.receipt.regressions == ()
+
+
+@pytest.fixture
+def mixed(conn, hera_home):
+    return freeze(conn, task_id="toy", requirements=REQUIREMENTS, checks=MIXED_CHECKS, files=dict(MIXED_FILES))
+
+
+@pytest.fixture
+def contract_only(conn, hera_home):
+    return freeze(conn, task_id="toy", requirements=REQUIREMENTS, checks=CONTRACT_CHECKS, files=dict(CONTRACT_FILES))
+
+
+def test_in_process_forgery_is_caught_by_contract_checks(conn, toy, mixed):
+    """The two KNOWN_GAP tests above document pytest-only check sets. With a hidden contract check
+    for R-1 the same forging candidate (hard-coded, plus a monkeypatch of pytest's reports) is no
+    longer PASS: the pytest side is forged, the contract side is not."""
+    commit = toy.candidate({"calc.py": HARDCODED_CALC + FORGE_PATCH})
+    out = run(conn, toy, mixed, commit)
+    by = {r.check_id: r.status.value for r in out.receipt.results}
+    assert by["chk-hidden-r1-seven"] == "pass" and by["chk-r1-basic"] == "pass"       # pytest results are forged ...
+    assert by["chk-c-hidden-r1-seven"] == "fail"                                      # ... the contract check is not
+    assert out.verdict is V.OVERFIT
+    assert out.attribution.label is A.IMPL_OVERFIT and out.reasons == ("requirement not satisfied in an unseen case: R-1",)
+    text = render_feedback(out)
+    assert "R-1" in text and "zq" not in text and "parse_seven" not in text
+    assert out.in_process_only == ("R-3",)                                            # R-3 has only pytest evidence
+
+
+def test_mixed_set_correct_passes_and_reports_what_rests_on_pytest_only(conn, toy, mixed):
+    out = run(conn, toy, mixed, toy.candidate(CANDIDATES["correct"]))
+    assert out.verdict is V.PASS and len(out.receipt.results) == 6 and out.receipt.manifest_ids == mixed.check_ids
+    assert out.in_process_only == ("R-3",)
+    assert any(n == "PASS for R-3 rests only on in-process checks, which a candidate can forge" for n in out.notes)
+    assert "in-process" not in render_feedback(out) and not any("in-process" in json.dumps(f) for f in out.feedback)
+    stored = json.loads(conn.execute("SELECT receipt_json FROM receipts WHERE id=?", (out.receipt_id,)).fetchone()[0])
+    assert stored["evidence"]["in_process_only"] == ["R-3"] and stored["evidence"]["contract"]["ran"] is True
+    assert verdict(load_receipt(conn, out.receipt_id)) == (V.PASS, [])
+
+
+def test_in_process_only_lists_requirements_for_pytest_only_sets_and_is_empty_for_contract_only(conn, toy, cs, contract_only):
+    commit = toy.candidate(CANDIDATES["correct"])
+    py_only = run(conn, toy, cs, commit)
+    assert py_only.verdict is V.PASS and py_only.in_process_only == ("R-1", "R-2", "R-3")
+    assert any("R-1, R-2, R-3 rests only on in-process checks" in n for n in py_only.notes)
+    assert "in-process" not in render_feedback(py_only)
+    ct = run(conn, toy, contract_only, commit)
+    assert ct.verdict is V.PASS and ct.in_process_only == () and not any("in-process" in n for n in ct.notes)
+    assert ct.receipt.sentinels_ok and ct.receipt.exit_code_consistent and ct.attribution is None
+
+
+def test_contract_only_set_matches_the_pytest_verdicts_on_the_toy_candidates(conn, toy, cs, contract_only):
+    for name in ("correct", "hardcoded", "tamper_conftest", "tamper_checks", "regression", "edit_tests"):
+        commit = toy.candidate(CANDIDATES[name])
+        a, b = run(conn, toy, cs, commit), run(conn, toy, contract_only, commit)
+        assert a.verdict is b.verdict, name
+
+
+def test_cli_shows_in_process_only(toy, hera_home, capsys):
+    from hera.store import db
+    conn = db.connect(paths.db_path())
+    py_cs = freeze(conn, task_id="toy", requirements=REQUIREMENTS, checks=CHECKS, files=dict(CHECK_FILES))
+    mx = freeze(conn, task_id="toy", requirements=REQUIREMENTS, checks=MIXED_CHECKS, files=dict(MIXED_FILES))
+    good = toy.candidate(CANDIDATES["correct"])
+    bad = toy.candidate({"calc.py": HARDCODED_CALC + FORGE_PATCH})
+    conn.close()
+    base = ["verify", "--task", "toy", "--allow-unsandboxed"]
+    assert cli.main([*base, "--checkset", py_cs.hash, "--commit", good]) == 0
+    assert "note: PASS for R-1, R-2, R-3 rests only on in-process checks, which a candidate can forge" in capsys.readouterr().out
+    assert cli.main([*base, "--checkset", mx.hash, "--commit", good]) == 0
+    assert "note: PASS for R-3 rests only on in-process" in capsys.readouterr().out
+    assert cli.main([*base, "--checkset", mx.hash, "--commit", bad]) == 3
+    out = capsys.readouterr().out
+    assert "verdict: OVERFIT" in out and "zq" not in out
 
 
 # ---- environment, health, scope of the run ----------------------------------------------------

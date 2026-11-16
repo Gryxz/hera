@@ -313,6 +313,18 @@ def _drain(stream, cap: int, buf: bytearray, flag: list) -> None:
         pass
 
 
+def _feed(stream, data: bytes) -> None:
+    try:
+        stream.write(data)
+    except (OSError, ValueError):
+        pass                           # the child closed its stdin or died: not an error here
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
 def _kill_group(pid: int) -> None:
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -323,7 +335,7 @@ def _kill_group(pid: int) -> None:
 def run(argv: Sequence[str], *, cwd, limits: Limits = Limits(), read_only: Sequence = (),
         writable: Sequence = (), env: Mapping[str, str] | None = None,
         mechanism: str | None = None, allow_unsandboxed: bool = False,
-        deny_read: Sequence = ()) -> RunResult:
+        deny_read: Sequence = (), stdin_data: bytes | None = None) -> RunResult:
     """Run ``argv`` in ``cwd`` under the chosen mechanism.
 
     ``cwd`` is the only writable project location (plus a private temp dir exported as
@@ -333,6 +345,9 @@ def run(argv: Sequence[str], *, cwd, limits: Limits = Limits(), read_only: Seque
     mechanism "none" provides NO isolation of network or filesystem; it still scrubs the
     environment and applies rlimits, the wall-clock timeout and output caps. It raises
     SandboxUnavailable unless ``allow_unsandboxed=True``.
+
+    ``stdin_data`` (bytes) is written to the child's standard input, which is then closed;
+    by default the child's stdin is /dev/null.
     """
     if mechanism is None:
         mechanism = detect_mechanism()
@@ -374,13 +389,15 @@ def run(argv: Sequence[str], *, cwd, limits: Limits = Limits(), read_only: Seque
             cmd = argv
         preexec = _make_preexec(limits)
         t0 = time.monotonic()
-        proc = subprocess.Popen(cmd, cwd=cwd_p, env=child_env, stdin=subprocess.DEVNULL,
+        proc = subprocess.Popen(cmd, cwd=cwd_p, env=child_env, stdin=(subprocess.DEVNULL if stdin_data is None else subprocess.PIPE),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 start_new_session=True, preexec_fn=preexec)
         out, err = bytearray(), bytearray()
         trunc = [False]
         threads = [threading.Thread(target=_drain, args=(proc.stdout, limits.max_output_bytes, out, trunc), daemon=True),
                    threading.Thread(target=_drain, args=(proc.stderr, limits.max_output_bytes, err, trunc), daemon=True)]
+        if stdin_data is not None:
+            threads.append(threading.Thread(target=_feed, args=(proc.stdin, bytes(stdin_data)), daemon=True))
         for t in threads:
             t.start()
         timed_out = False
@@ -390,9 +407,15 @@ def run(argv: Sequence[str], *, cwd, limits: Limits = Limits(), read_only: Seque
             timed_out = True
         _kill_group(proc.pid)          # also reaps stragglers left behind by a normal exit
         proc.wait()
+        # A straggler that escaped the process group (setsid) can hold the pipes open; wait for
+        # the readers for a bounded time only. Closing a stream a reader is still blocked on would
+        # itself block until the straggler exits, so those are left to the (daemon) reader thread.
+        deadline = time.monotonic() + 5
         for t in threads:
-            t.join(timeout=5)
-        for s in (proc.stdout, proc.stderr):
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+        for s, t in ((proc.stdout, threads[0]), (proc.stderr, threads[1])):
+            if t.is_alive():
+                continue
             try:
                 s.close()
             except OSError:

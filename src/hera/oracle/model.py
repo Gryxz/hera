@@ -16,14 +16,20 @@ from ..types import CheckResult, CheckStatus
 _REQ_ID = re.compile(r"R-[0-9]{1,4}")
 _CHECK_ID = re.compile(r"[A-Za-z0-9_.-]{1,80}")
 _NODE = re.compile(r"test_[A-Za-z0-9_]*")
+_CONTRACT_NODE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 _SEGMENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 VISIBILITIES = ("visible", "hidden")
 KINDS = ("new", "regression")
+RUNNERS = ("pytest", "contract")
+CONTRACT_SUFFIX = ".contract.toml"
 
 
-def validate_relpath(relpath: str) -> str:
-    """Return ``relpath`` if it is a safe POSIX path of a ``test_*.py`` file, else ValueError."""
+def validate_relpath(relpath: str, runner: str = "pytest") -> str:
+    """Return ``relpath`` if it is a safe POSIX path of a ``test_*.py`` file (runner "pytest") or
+    of a ``*.contract.toml`` file (runner "contract"), else ValueError."""
+    if runner not in RUNNERS:
+        raise ValueError("runner: must be 'pytest' or 'contract'")
     if not isinstance(relpath, str) or not relpath or "\\" in relpath or "\0" in relpath:
         raise ValueError("relpath: must be a non-empty POSIX path")
     if relpath.startswith("/") or PurePosixPath(relpath).is_absolute():
@@ -33,6 +39,10 @@ def validate_relpath(relpath: str) -> str:
         if p in ("", ".", "..") or not _SEGMENT.fullmatch(p):
             raise ValueError("relpath: contains an empty, dot, parent or unsupported segment")
     name = parts[-1]
+    if runner == "contract":
+        if not (name.endswith(CONTRACT_SUFFIX) and len(name) > len(CONTRACT_SUFFIX)):
+            raise ValueError("relpath: file name must match *.contract.toml")
+        return relpath
     if not (name.startswith("test_") and name.endswith(".py") and len(name) > len("test_.py")):
         raise ValueError("relpath: file name must match test_*.py")
     return relpath
@@ -60,6 +70,7 @@ class DraftCheck:
     author_role: str = "visible"
     author_model: str = ""
     kind: str = "new"
+    runner: str = "pytest"
 
     def __post_init__(self):
         if isinstance(self.requirement_ids, (list, set, frozenset)):
@@ -73,9 +84,14 @@ class DraftCheck:
             raise ValueError("DraftCheck.requirement_ids: duplicate id")
         if self.visibility not in VISIBILITIES:
             raise ValueError("DraftCheck.visibility: must be 'visible' or 'hidden'")
-        validate_relpath(self.relpath)
-        if not isinstance(self.node, str) or not _NODE.fullmatch(self.node):
-            raise ValueError("DraftCheck.node: must be a test function name (test_...)")
+        if self.runner not in RUNNERS:
+            raise ValueError("DraftCheck.runner: must be 'pytest' or 'contract'")
+        validate_relpath(self.relpath, self.runner)
+        if self.runner == "pytest":
+            if not isinstance(self.node, str) or not _NODE.fullmatch(self.node):
+                raise ValueError("DraftCheck.node: must be a test function name (test_...)")
+        elif not isinstance(self.node, str) or not _CONTRACT_NODE.fullmatch(self.node):
+            raise ValueError("DraftCheck.node: must match [A-Za-z_][A-Za-z0-9_]{0,63}")
         if self.author_role not in VISIBILITIES:
             raise ValueError("DraftCheck.author_role: must be 'visible' or 'hidden'")
         if not isinstance(self.author_model, str):
@@ -100,6 +116,13 @@ class CheckSet:
         return frozenset(c.check_id for c in self.checks)
 
 
+def checks_by_runner(checkset: "CheckSet", runner: str) -> tuple[DraftCheck, ...]:
+    """The checks of ``checkset`` that are executed by ``runner`` ("pytest" or "contract")."""
+    if runner not in RUNNERS:
+        raise ValueError("runner: must be 'pytest' or 'contract'")
+    return tuple(c for c in checkset.checks if c.runner == runner)
+
+
 def validate_draft(requirements, checks) -> None:
     """Cross-object validation shared by freeze and the tests. Raises ValueError (field names
     only, no file contents)."""
@@ -121,8 +144,14 @@ def validate_draft(requirements, checks) -> None:
         seen_nodes.add(key)
         if vis_of_file.setdefault(c.relpath, c.visibility) != c.visibility:
             raise ValueError("checks.visibility: a file may not mix visible and hidden checks")
+    runner_of_file: dict[str, str] = {}
+    for c in checks:
+        if runner_of_file.setdefault(c.relpath, c.runner) != c.runner:
+            raise ValueError("checks.runner: a file may not mix runners")
     mods: dict[str, str] = {}
     for rel in vis_of_file:
+        if runner_of_file[rel] != "pytest":
+            continue
         m = module_name(rel)
         if mods.setdefault(m, rel) != rel:
             raise ValueError("checks.relpath: two files map to the same module name")
