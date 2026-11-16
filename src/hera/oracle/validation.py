@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ..types import CheckHealth, CheckStatus
-from .model import CheckSet
+from .contract_runner import ContractRunner
+from .model import CheckSet, checks_by_runner
 
 ABSENT = "absent"
 _EXC_LINE = re.compile(r"^E\s+([A-Za-z_][\w.]*(?:Error|Exception))\b", re.M)
@@ -77,18 +78,31 @@ def validate_on_base(adapter, checkout_factory: Callable[[], tuple], checkset: C
     statuses: dict[str, list[str]] = {c.check_id: [] for c in checkset.checks}
     texts: dict[str, list[str]] = {c.check_id: [] for c in checkset.checks}
     broken = False
+    has_pytest = bool(checks_by_runner(checkset, "pytest"))
+    has_contract = bool(checks_by_runner(checkset, "contract"))
     for _ in range(runs):
         checkout, base_tree = checkout_factory()
-        adapter.prepare(checkout, checkset, base_tree=base_tree, include_hidden=True)
-        rep = adapter.run(checkout, checkset, include_hidden=True, allow_unsandboxed=allow_unsandboxed)
-        if (not rep.results_parsed or not rep.sentinels_ok or not rep.exit_code_consistent
-                or rep.timed_out):
-            broken = True
-        got = {r.check_id: r.status for r in rep.results}
+        got: dict = {}
+        run_texts: dict[str, str] = {}
+        if has_pytest:
+            adapter.prepare(checkout, checkset, base_tree=base_tree, include_hidden=True)
+            rep = adapter.run(checkout, checkset, include_hidden=True, allow_unsandboxed=allow_unsandboxed)
+            if (not rep.results_parsed or not rep.sentinels_ok or not rep.exit_code_consistent
+                    or rep.timed_out):
+                broken = True
+            got.update({r.check_id: r.status for r in rep.results})
+            run_texts.update(rep.failure_texts)
+        if has_contract:
+            crep = ContractRunner().run(checkout, checkset, include_hidden=True,
+                                        allow_unsandboxed=allow_unsandboxed)
+            if crep.timed_out_any:
+                broken = True
+            got.update({r.check_id: r.status for r in crep.results})
+            run_texts.update(crep.failure_texts)
         for c in checkset.checks:
             st = got.get(c.check_id)
             statuses[c.check_id].append(st.value if st else ABSENT)
-            texts[c.check_id].append(rep.failure_texts.get(c.check_id, ""))
+            texts[c.check_id].append(run_texts.get(c.check_id, ""))
             if st is None:
                 broken = True
 

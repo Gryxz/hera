@@ -137,3 +137,35 @@ def make_toy(tmp_path: Path, task_id: str = "toy", with_tests: bool = True) -> T
     _git(src, "commit", "-q", "-m", "base")
     repo = TaskRepo.create(task_id, src)
     return Toy(src, repo, repo.base_commit)
+
+
+# ---- contract checks (S7c): the same requirements, checked out of process -----------------------
+def _ct(node: str, arg: str, expect: str, code: str = "import calc, sys; print(calc.parse_amount(sys.argv[1]))") -> bytes:
+    return (f'[[check]]\nnode = "{node}"\nargv = ["{{python}}", "-c", \'{code}\', "{arg}"]\n'
+            f"[check.expect]\n{expect}\n").encode()
+
+
+CT_BASIC = _ct("basic_amount", "12.50", 'exit_code = 0\nstdout_equals = "12.5\\n"')
+CT_EMPTY = _ct("empty_raises", "", 'exit_code = 1\nstderr_contains = ["ValueError"]')
+CT_SEVEN = _ct("parse_seven", "7", 'exit_code = 0\nstdout_equals = "7.0\\n"')
+CT_ADD = _ct("add_unchanged", "", 'exit_code = 0\nstdout_equals = "5\\n"', code="import calc; print(calc.add(2, 3))")
+
+CONTRACT_FILES = {
+    "basic.contract.toml": CT_BASIC,
+    "empty.contract.toml": CT_EMPTY,
+    "hidden_zq.contract.toml": CT_SEVEN,
+    "add.contract.toml": CT_ADD,
+}
+C_BASIC = DraftCheck("chk-c-basic", ("R-1",), "visible", "basic.contract.toml", "basic_amount", runner="contract")
+C_EMPTY = DraftCheck("chk-c-empty", ("R-2",), "visible", "empty.contract.toml", "empty_raises", runner="contract")
+C_SEVEN = DraftCheck("chk-c-hidden-r1-seven", ("R-1",), "hidden", "hidden_zq.contract.toml", "parse_seven",
+                     author_role="hidden", runner="contract")
+C_ADD = DraftCheck("chk-c-add", ("R-3",), "visible", "add.contract.toml", "add_unchanged", kind="regression",
+                   runner="contract")
+
+# Contract-only: every requirement is checked out of process.
+CONTRACT_CHECKS = (C_BASIC, C_EMPTY, C_SEVEN, C_ADD)
+
+# Mixed: the pytest checks above plus a hidden contract check for R-1 and a visible one for R-2.
+MIXED_CHECKS = CHECKS + (C_SEVEN, C_EMPTY)
+MIXED_FILES = {**CHECK_FILES, "hidden_zq.contract.toml": CT_SEVEN, "empty.contract.toml": CT_EMPTY}

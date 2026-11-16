@@ -41,6 +41,8 @@ process group is killed with SIGKILL) and a per-stream output cap.
 
 ## Known limits
 
+- `run(..., stdin_data=bytes)` feeds the child's stdin (used by contract checks); by default stdin is /dev/null. A process that escapes the process group (setsid) can hold the output pipes open: the run stops waiting for the readers after five seconds in total and returns. Under `none` such a process keeps running; under `bwrap` the pid namespace ends it with the run.
+
 - `sandbox-exec` is deprecated by Apple but present on current macOS. The profile uses
   `file-read-data` denies, so file metadata (existence, size) remains visible; broad temp roots are
   denied rather than every possible location. The macOS path has not been run by its author (see the

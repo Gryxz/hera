@@ -289,3 +289,15 @@ def test_checkout_runs_in_sandbox(tmp_path, monkeypatch):
     assert r.returncode == 0, r.stderr
     assert r.mechanism == detect_mechanism()
     repo.cleanup_verification(checkout)
+
+
+def test_a_straggler_holding_the_pipes_cannot_stall_the_run_past_its_limits(tmp_path):
+    """A process that escaped the process group (setsid) keeps stdout open. The run must still
+    return promptly instead of waiting for it (with mechanism 'none' nothing kills it; with a real
+    mechanism it dies with the sandbox)."""
+    code = ("import os, time\n"
+            "if os.fork() == 0:\n    os.setsid()\n    if os.fork() == 0:\n        time.sleep(25)\n    os._exit(0)\n")
+    t0 = time.monotonic()
+    r = py(code, tmp_path, mechanism=MECH if MECH != "none" else "none", allow_unsandboxed=True)
+    assert r.returncode == 0 and not r.timed_out
+    assert time.monotonic() - t0 < 15

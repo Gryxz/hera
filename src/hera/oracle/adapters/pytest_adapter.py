@@ -21,7 +21,7 @@ from ... import sandbox
 from ...types import CheckResult, CheckStatus
 from ...workspace import _rm_tree
 from ..checkstore import verify_integrity
-from ..model import CheckSet, PrepareReport, ProjectRunReport, RunReport, module_name
+from ..model import CheckSet, PrepareReport, ProjectRunReport, RunReport, checks_by_runner, module_name
 
 CHECKS_DIR = "_hera_checks"
 RESULTS_DIR = "_hera_results"
@@ -170,8 +170,10 @@ class PytestAdapter:
                     modified.append(rel)
 
         # 2. frozen checks
-        vis = {c.relpath: c.visibility for c in checkset.checks}
-        for rel in sorted(checkset.files):
+        # Only pytest files are copied. Contract files (visible or hidden) are read by the
+        # contract runner straight from the store and never enter a checkout.
+        vis = {c.relpath: c.visibility for c in checks_by_runner(checkset, "pytest")}
+        for rel in sorted(vis):
             if vis[rel] == "hidden" and not include_hidden:
                 continue
             data = (checkset.root / vis[rel] / rel).read_bytes()
@@ -382,7 +384,7 @@ def _summary_counts(stdout: bytes, truncated: bool) -> dict[str, int] | None:
 
 
 def _parse(checkout: Path, checkset: CheckSet, include_hidden: bool, rr) -> RunReport:
-    expected = [c for c in checkset.checks if include_hidden or c.visibility == "visible"]
+    expected = [c for c in checks_by_runner(checkset, "pytest") if include_hidden or c.visibility == "visible"]
     modules: dict[str, tuple[str, str]] = {}      # dotted module -> (visibility, relpath)
     by_key: dict[tuple[str, str], object] = {}    # (classname, function) -> DraftCheck
     for c in expected:

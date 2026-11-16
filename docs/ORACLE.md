@@ -1,18 +1,21 @@
-# Acceptance oracle (S7a: checks, frozen store, pytest adapter, validation; S7b: audit, verify, verdicts, disputes)
+# Acceptance oracle (S7a: checks, frozen store, pytest adapter, validation; S7b: audit, verify, verdicts, disputes; S7c: contract checks)
 
 Code: `src/hera/oracle/model.py`, `checkstore.py`, `adapters/pytest_adapter.py`, `validation.py`
-(S7a); `audit.py`, `verify.py`, `disputes.py` (S7b).
+(S7a); `audit.py`, `verify.py`, `disputes.py` (S7b); `contract.py`, `contract_runner.py` (S7c).
 Tests: `tests/test_checkstore.py`, `tests/test_pytest_adapter.py`, `tests/test_validation.py`
-(S7a); `tests/test_audit.py`, `tests/test_verify_e2e.py`, `tests/test_disputes.py` (S7b), with
+(S7a); `tests/test_audit.py`, `tests/test_verify_e2e.py`, `tests/test_disputes.py` (S7b);
+`tests/test_contract.py`, `tests/test_contract_runner.py` (S7c), with
 the invented toy project in `tests/toyrepo.py`.
 
 ## Objects
 
 - `Requirement(id "R-n", text)`.
-- `DraftCheck`: one check is one pytest test function: `check_id`, `requirement_ids`, `visibility`
-  (`visible` | `hidden`), `relpath` (POSIX, relative, `test_*.py`), `node` (function name),
-  `author_role`, `author_model`, `kind` (`new`: must fail before the change; `regression`: must pass
-  before and after). A file holds checks of one visibility only.
+- `DraftCheck`: one check is one pytest test function or one contract check: `check_id`,
+  `requirement_ids`, `visibility` (`visible` | `hidden`), `relpath` (POSIX, relative; `test_*.py` for
+  runner `pytest`, `*.contract.toml` for runner `contract`), `node` (function name, or the contract
+  node), `author_role`, `author_model`, `kind` (`new`: must fail before the change; `regression`: must
+  pass before and after), `runner` (`pytest`, the default, or `contract`). A file holds checks of one
+  visibility and one runner only. `checks_by_runner(checkset, runner)` selects them.
 - `CheckSet`: hash, task id, requirements, checks, `files` (relpath to sha256), adapter, root path,
   `uncovered` (requirements with no check; reported, not an error).
 - Validation errors name the field, never file contents.
@@ -38,6 +41,11 @@ symlink raises. Rows go to `requirements`, `checksets`, `checks` with no schema 
 two conventions: `requirements.id` is `<task_id>:<R-n>` (the column is a global primary key) and
 `checks.requirement_id` holds the check's requirement ids joined by commas. `supersede` sets
 `checksets.supersedes` for later disputes.
+
+The `runner` of every check is part of the manifest, so it is part of the hash. At freeze time every
+contract file is parsed with `contract.load_contract_file`; each contract `DraftCheck` must name a node
+that exists in its file and every node of the file must be named by exactly one `DraftCheck` (no silent
+extra checks).
 
 Only `visible_dir` may ever be handed to an implementer workspace. `hidden_dir` is for oracle runs.
 
@@ -105,6 +113,10 @@ entry names the rule that fired.
    about the candidate and nothing is persisted.
 2. A fresh verification checkout of the commit; `prepare` (base protected paths restored);
    `run` in the sandbox (mechanism auto-detected; `allow_unsandboxed=True` is needed where there is none).
+   The pytest adapter runs only if the check set has pytest checks (otherwise the sentinel and exit-code
+   flags are True: there is nothing in-process to forge). If it has contract checks, a second fresh
+   checkout is prepared and the `ContractRunner` runs them (see "Contract checks"); results, executed ids
+   and failure texts of both runners are merged and the manifest ids are all included checks of both.
 3. Diff audit (below), given the `PrepareReport` so the two views cannot disagree silently.
 4. Regressions: the project's PRE-EXISTING tests (the `test_*.py` / `*_test.py` files of the base tree)
    run in a SECOND fresh checkout of the commit (protected files restored by `prepare`, hidden checks
@@ -158,7 +170,9 @@ A run that hits the wall limit cannot produce a JUnit file, so the adapter repor
 `exit_code_consistent` false. That is not tampering. When the check run timed out the receipt is built
 with both true; the TIMEOUT statuses (which count as not passing) produce FAIL or OVERFIT through the
 verdict function, and the outcome records `timed_out=True`. The raw adapter values stay in the stored
-evidence. A timeout never becomes TAMPER unless the audit blocks.
+evidence. A timeout never becomes TAMPER unless the audit blocks. The rule is per runner: a timeout of the
+pytest run excuses only the pytest integrity flags; a timeout in a contract check produces `TIMEOUT`
+statuses and excuses nothing else, so it cannot hide a failed sentinel or an inconsistent pytest summary.
 
 ## Attribution (deterministic; first matching rule wins; never defaults to IMPL_WRONG)
 
@@ -196,6 +210,115 @@ check id, file name, function name, input or expected value (tested on the hard-
 oracle's checkout location is replaced by `<checkout>`; sentinel and exit-code mechanics are reported
 only as "the integrity checks on the verification run failed".
 
+## Contract checks (S7c)
+
+Native pytest checks run candidate code in the runner's own process, which is why they can be forged
+(below). A contract check is declarative: the candidate's code runs as a SEPARATE sandboxed subprocess
+that is given the check's inputs, and the comparison of its output with the expectations happens in the
+oracle (the HERA coordinator process), which never imports, executes or evaluates anything from the
+checkout. A candidate can do anything inside its own process; it cannot change what the oracle compares,
+and it never sees the expected values of a hidden check.
+
+### File format (`*.contract.toml`, parsed with `tomllib`)
+
+```toml
+[[check]]
+node = "parse_twelve_fifty"          # [A-Za-z_][A-Za-z0-9_]{0,63}, unique within the file
+argv = ["{python}", "-c", "import calc, sys; print(calc.parse_amount(sys.argv[1]))", "12.50"]
+stdin = ""                           # optional, at most 64 KB
+timeout_s = 10                       # optional, default 10, above 0 and at most 120
+env = { LANG = "C.UTF-8" }           # optional
+files = { "input.json" = "{...}" }   # optional; written into the run directory first (relative paths, at most 64 KB each)
+
+[check.expect]                       # at least one expectation
+exit_code = 0
+stdout_equals = "12.5\n"             # exact match after normalising \r\n to \n
+stdout_contains = ["12.5"]
+stderr_contains = ["ValueError"]
+stdout_json = { value = 12.5 }       # stdout parsed as JSON must EQUAL this (any TOML value)
+stdout_json_subset = { ok = true }   # every key/value must appear in the parsed JSON object (recursive for tables)
+files_equal = { "out.txt" = "done\n" }       # file in the run directory after the run
+files_contain = { "log.txt" = ["started"] }
+```
+
+- `{python}` is replaced by the interpreter the oracle chose (`sys.executable` for now) in every argv
+  element that is exactly `{python}`. There are no other placeholders (a `{python}` inside a longer
+  string is left alone). `argv[0]` otherwise must be a bare program name (resolved on the sandbox `PATH`)
+  or a relative path inside the checkout; absolute paths, `..` segments and a leading `-` are rejected at
+  load time.
+- `env` keys match `[A-Z_][A-Z0-9_]*` and may not be `PATH`, `HOME`, `TMPDIR`, `PYTHONPATH`,
+  `PYTHONHOME`, `PYTHONSTARTUP` or start with `LD_`, `DYLD_`, `HERA_`. The oracle sets `PYTHONPATH` itself
+  to the run directory and its `src/`, so flat and src layouts both import.
+- Limits: file at most 256 KB; at most 200 checks per file; at most 64 argv elements; at most 32 input
+  files, 32 env variables and 32 expected files per check. Unknown keys anywhere raise ValueError naming
+  the key (never the file's content). Expectation lists and tables must not be empty (no vacuous checks);
+  `stdout_json` values must be JSON-representable (no dates, NaN or infinity) and at most 64 levels deep.
+- **No regular expressions in v0.** A pattern written by a model and evaluated in the coordinator against
+  candidate-controlled output is a denial-of-service risk. Expectations are exact text, substrings, exact
+  JSON and exact files.
+- Comparison rules: stdout, stderr and expected files are decoded as UTF-8 (invalid bytes replaced) and
+  `\r\n` is normalised to `\n` on both sides. JSON equality is strict (a boolean is never a number;
+  numbers compare by value); `stdout_json_subset` recurses into tables only (arrays must match exactly).
+  JSON parsing of stdout is capped at 1 MB and catches invalid input, NaN/Infinity, over-deep nesting and
+  recursion errors: each is a failed expectation, never an oracle crash. File expectations read regular
+  files only, at most 1 MB, and never follow symbolic links (a symlink in any component fails the
+  expectation). Truncated output (above the sandbox capture cap) never passes. A timeout is `TIMEOUT`; a
+  program that could not be started is `ERROR`; otherwise `PASS` or `FAIL` with the failed expectations.
+
+### Execution model
+
+`ContractRunner.run(checkout, checkset, include_hidden, limits, allow_unsandboxed)` returns a
+`ContractRunReport` (results, executed ids, failure texts for visible checks, `timed_out_any`, mechanism).
+For EACH contract check it: copies the verification checkout into a fresh run directory next to it (so
+inside the task's verify area, which the sandbox may write to; the oracle's own `_hera_checks`,
+`_hera_results` and `_hera_project` are left out and symlinks that point out of the copy are removed);
+writes the check's `files` without following links; runs `argv` under `hera.sandbox` with `cwd` the run
+directory, the check's timeout as the wall limit and a scrubbed environment; evaluates in this process;
+deletes the run directory. A fresh copy per check means a candidate cannot carry state from one check to
+the next or learn one check's inputs from an earlier one. Contract files are read from the frozen store
+(hash-checked on every read) by the oracle and are NEVER copied into any checkout or run directory;
+`PytestAdapter.prepare` skips them too. Visible contract files may be shown to an implementer like visible
+pytest files. The inputs of a hidden check (argv, stdin, env, input files) are necessarily visible to the
+candidate while it runs; the expectations are not.
+
+Feedback: a failing visible check gives its id, requirement ids, the failed expectations and the first
+2,000 characters of stdout and stderr (the run directory is shown as `<checkout>`). A failing hidden check
+gives requirement ids only (same redaction as pytest). `CheckResult.output_digest` is the sha256 of
+stdout + stderr for any non-passing check. Health comes from the stored `checks.health`, as for pytest
+checks. Validation on the base commit (`validate_on_base`) runs contract checks through the same runner,
+with the same fail-before, pass-before and 3x stability rules; `kind "new"` checks that fail on base
+are VALID (`fails_before_change`).
+
+`VerificationOutcome.in_process_only` lists the requirement ids that PASSED where every passing counted
+check is a native pytest check. When it is not empty `outcome.notes` carries "PASS for <ids> rests only on
+in-process checks, which a candidate can forge" and `hera verify` prints it. It is never part of the
+implementer's feedback. The receipt, the verdict function and the schema are unchanged.
+
+### What this closes and what stays open
+
+CLOSED for contract checks: a candidate that monkeypatches pytest, rewrites result files, patches the
+oracle's modules inside its own process or writes `_hera_results/junit.xml` has no effect, because
+nothing the oracle compares was produced inside that process. Tested:
+`test_in_process_forgery_is_caught_by_contract_checks` (the forging candidate is OVERFIT when the set has a
+hidden contract check) and `test_monkeypatching_pytest_and_forging_result_files_has_no_effect`.
+
+STILL OPEN:
+
+- Native pytest checks are unchanged and forgeable in-process (the two KNOWN_GAP tests document this for
+  pytest-only sets and stay as they are). So is the regression run of the project's own tests.
+- A contract check can only look at an external surface (command line, files, later HTTP). Author hidden
+  checks as contract checks wherever the task has one; `in_process_only` shows what still rests on pytest.
+- A candidate that detects it is being checked can still behave differently under check than in
+  production; hidden inputs and varied cases are what catch that (OVERFIT), not the runner.
+- With sandbox mechanism `none` (tests and development only) nothing isolates processes or the file
+  system: a candidate can read the frozen store from disk and a process that escapes the process group
+  (setsid) can tamper with a later check's run directory. Both were tried in S7c and succeed under
+  `none`. The real mechanisms are built to stop them (the check store is on the deny list; bwrap's pid
+  namespace dies with the run) and two tests assert it, but those tests skip where there is no mechanism
+  and had not been run by their author when this was written; CI is their first run. The verifier must not use `none` for real runs.
+- A straggler that escaped the process group can hold the output pipes open; `sandbox.run` now stops
+  waiting for the readers after five seconds in total instead of blocking until the straggler exits.
+
 ## Residual risk, stated plainly
 
 Native pytest checks import the candidate's code into the same process as the runner. Code in the
@@ -207,11 +330,14 @@ a forged all-pass file, because pytest's own summary line, already written to th
 hidden check files are also readable by candidate code during a run. The same in-process route applies
 to the run of the project's own tests (regressions could be hidden); the summary cross-check is applied
 there too and folded into `exit_code_consistent`. Closing this needs the checks to run out of process
-from the candidate: S7c (contract checks; see the README's next step), and a per-run VM or container
-(milestone 0.2). The audit does NOT flag candidates that touch pytest internals.
+from the candidate: contract checks (S7c, above) close it for checks that have an external surface; a
+per-run VM or container is milestone 0.2. The audit does NOT flag candidates that touch pytest internals.
 
-**Status: OPEN.** The e2e test `test_KNOWN_GAP_in_process_monkeypatch_yields_false_pass` asserts the
-false PASS and must be flipped when out-of-process checks land.
+**Status: CLOSED for contract checks, OPEN for native pytest checks.** The e2e tests
+`test_KNOWN_GAP_in_process_monkeypatch_yields_false_pass` and
+`test_KNOWN_GAP_in_process_monkeypatch_is_not_detected` still assert the false PASS: they document that a
+pytest-only check set remains forgeable, and they must keep passing until pytest checks themselves move
+out of process.
 
 Other limits of S7b: the project's third-party pytest plugins are not loaded; git attributes in the
 shared bare repository's `info/attributes` (writable from an implementer worktree) could make git treat
@@ -220,9 +346,14 @@ attributed `UNKNOWN` (with `environment_suspect`) although its verdict is TAMPER
 
 ## Not yet built
 
-Out-of-process (contract) checks (S7c), requirements summary and approval screen, two blind check
+Requirements summary and approval screen, two blind check
 authors, persisting validation results into `checks.health`, stub adversaries
 and mutation testing (TODO, milestone 0.2), model-written checks (needs a real provider call),
 per-language environments (checks run with the same Python interpreter that runs HERA; building an
 environment from the project's lockfile is later), a TypeScript adapter, a per-test timeout (a hang
 loses every result of that run).
+
+## Verification without a sandbox
+
+`allow_unsandboxed=True` (CLI `--allow-unsandboxed`) exists so the test suite runs on machines with no sandbox mechanism. Under mechanism `none` nothing is isolated: a candidate can read the frozen store, including hidden contract checks, and a background process it leaves behind can tamper with later checks. Every outcome verified this way carries the note "verified WITHOUT sandbox isolation", and such a verdict must not be relied on against a hostile candidate.
+

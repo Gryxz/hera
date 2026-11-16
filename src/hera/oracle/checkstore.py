@@ -24,7 +24,9 @@ from pathlib import Path
 
 from .. import paths
 from ..workspace import _check_id
-from .model import CheckSet, DraftCheck, Requirement, validate_draft, validate_relpath
+from .contract import load_contract_file
+from .model import (CheckSet, DraftCheck, Requirement, checks_by_runner, validate_draft,  # noqa: F401
+                    validate_relpath)
 
 
 class CheckStoreTampered(RuntimeError):
@@ -42,7 +44,8 @@ def _canon(obj) -> bytes:
 def _check_dict(c: DraftCheck) -> dict:
     return {"check_id": c.check_id, "requirement_ids": sorted(c.requirement_ids),
             "visibility": c.visibility, "relpath": c.relpath, "node": c.node,
-            "author_role": c.author_role, "author_model": c.author_model, "kind": c.kind}
+            "author_role": c.author_role, "author_model": c.author_model, "kind": c.kind,
+            "runner": c.runner}
 
 
 def _manifest(task_id, adapter, requirements, checks, files_sha, summary_text) -> dict:
@@ -86,7 +89,7 @@ def _build(manifest: dict, texts: dict, root: Path) -> CheckSet:
     reqs = tuple(Requirement(i, texts["requirements"][i]) for i, _h in manifest["requirements"])
     checks = tuple(DraftCheck(c["check_id"], tuple(c["requirement_ids"]), c["visibility"],
                               c["relpath"], c["node"], c["author_role"], c["author_model"],
-                              c["kind"]) for c in manifest["checks"])
+                              c["kind"], c["runner"]) for c in manifest["checks"])
     return CheckSet(hash=_sha(_canon(manifest)), task_id=manifest["task_id"], requirements=reqs,
                     checks=checks, files=dict(manifest["files"]), adapter=manifest["adapter"],
                     root=root, uncovered=_uncovered(reqs, checks))
@@ -100,6 +103,19 @@ def _chmod_readonly(root: Path) -> None:
         os.chmod(dirpath, 0o555)
 
 
+def _check_contract_file(rel: str, data: bytes, drafts: list[DraftCheck]) -> None:
+    """A contract file must parse, every DraftCheck must name a node of it, and every node of
+    it must be named by exactly one DraftCheck (no silent extra checks)."""
+    nodes = {c.node for c in load_contract_file(data, rel)}          # ValueError names the key
+    named = [d.node for d in drafts]
+    if len(set(named)) != len(named):
+        raise ValueError("checks: two checks name the same node of a contract file")
+    if set(named) - nodes:
+        raise ValueError("checks.node: names a node that does not exist in its contract file")
+    if nodes - set(named):
+        raise ValueError("files: a contract file holds a node that no check refers to")
+
+
 def freeze(conn: sqlite3.Connection, *, task_id: str, requirements, checks,
            files: dict[str, bytes], adapter: str = "pytest", summary_text: str = "") -> CheckSet:
     """Hash, write read-only and record a check set. Idempotent for identical content."""
@@ -109,14 +125,18 @@ def freeze(conn: sqlite3.Connection, *, task_id: str, requirements, checks,
         raise ValueError("adapter: must be a short identifier")
     if not isinstance(files, dict) or not all(isinstance(v, (bytes, bytearray)) for v in files.values()):
         raise ValueError("files: must map relpath to bytes")
-    for rel in files:
-        validate_relpath(rel)
     validate_draft(requirements, checks)
-    used = {c.relpath for c in checks}
+    runner_of = {c.relpath: c.runner for c in checks}
+    for rel in files:
+        validate_relpath(rel, runner_of.get(rel, "pytest"))
+    used = set(runner_of)
     if used - set(files):
         raise ValueError("files: a check refers to a file that was not supplied")
     if set(files) - used:
         raise ValueError("files: a supplied file is not referenced by any check")
+    for rel, runner in runner_of.items():
+        if runner == "contract":
+            _check_contract_file(rel, files[rel], [c for c in checks if c.relpath == rel])
     files = {k: bytes(v) for k, v in files.items()}
     files_sha = {rel: _sha(data) for rel, data in files.items()}
     manifest = _manifest(task_id, adapter, requirements, checks, files_sha, summary_text)
