@@ -53,6 +53,11 @@ HARDCODED_CALC = CALC + (
     "    raise ValueError('unsupported')\n")
 SLOW_CALC = CALC + "\n\ndef parse_amount(text):\n    import time\n    time.sleep(10_000)\n"
 
+REGRESSION_CALC = ("def add(a, b):\n    return a - b\n\n\ndef parse_amount(text):\n    text = text.strip()\n"
+                   "    if not text:\n        raise ValueError('empty amount')\n    return float(text)\n")
+EDITED_TEST_CALC = ("import pytest\nfrom calc import add\n\n\n@pytest.mark.skip(reason='later')\n"
+                    "def test_add():\n    assert add(1, 2) == 4\n")
+
 CONFTEST_TAMPER = CONFTEST + (
     "\n\n@pytest.hookimpl(hookwrapper=True)\ndef pytest_runtest_makereport(item, call):\n"
     "    outcome = yield\n    rep = outcome.get_result()\n    rep.outcome = 'passed'\n    rep.longrepr = None\n\n\n"
@@ -69,7 +74,28 @@ CANDIDATES: dict[str, dict[str, str]] = {
                       "_hera_results/junit.xml": FORGED_JUNIT},
     "skip_all": {"pytest.ini": "[pytest]\naddopts = -k nothing_matches\n"},
     "slow": {"calc.py": SLOW_CALC},
+    "regression": {"calc.py": REGRESSION_CALC},
+    "edit_tests": {"tests/test_calc.py": EDITED_TEST_CALC},
 }
+
+# Variant check set without the R-3 regression check (and without requirement R-3), so that only
+# the comparison with the project's own pre-existing tests can catch the REGRESSION candidate.
+VARIANT_REQUIREMENTS = REQUIREMENTS[:2]
+VARIANT_CHECKS = CHECKS[:3]
+VARIANT_FILES = {k: v for k, v in CHECK_FILES.items() if k != "test_calc_unchanged.py"}
+
+# In-process forgery (the known gap): rewrites every report inside the pytest process.
+FORGE_PATCH = '''
+import _pytest.reports as R
+_orig = R.TestReport.from_item_and_call.__func__
+def _patched(cls, item, call):
+    rep = _orig(cls, item, call)
+    if item.name != "test_hera_must_fail":
+        rep.outcome = "passed"
+        rep.longrepr = None
+    return rep
+R.TestReport.from_item_and_call = classmethod(_patched)
+'''
 
 
 def _git(cwd, *args):
@@ -98,14 +124,15 @@ class Toy:
         return wt.commit_all("candidate")
 
 
-def make_toy(tmp_path: Path, task_id: str = "toy") -> Toy:
+def make_toy(tmp_path: Path, task_id: str = "toy", with_tests: bool = True) -> Toy:
     src = tmp_path / "toy-source"
-    src.mkdir()
+    src.mkdir(parents=True)
     _git(src, "init", "-q", "-b", "main")
     (src / "calc.py").write_text(CALC)
     (src / "conftest.py").write_text(CONFTEST)
-    (src / "tests").mkdir()
-    (src / "tests" / "test_calc.py").write_text(TEST_CALC)
+    if with_tests:
+        (src / "tests").mkdir()
+        (src / "tests" / "test_calc.py").write_text(TEST_CALC)
     _git(src, "add", "-A")
     _git(src, "commit", "-q", "-m", "base")
     repo = TaskRepo.create(task_id, src)

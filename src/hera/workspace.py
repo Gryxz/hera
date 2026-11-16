@@ -451,3 +451,41 @@ class TaskRepo:
                 ins += int(a)
                 dels += int(d)
         return {"files": files, "insertions": ins, "deletions": dels}
+
+    def diff_name_status(self, base: str, commit: str) -> dict[str, str]:
+        """Map changed path -> one-letter status (A added, M modified, D deleted, T type change)."""
+        out = self._diff_tree(base, commit, "--name-status")
+        parts = out.split(b"\0")
+        result: dict[str, str] = {}
+        for i in range(0, len(parts) - 1, 2):
+            result[os.fsdecode(parts[i + 1])] = parts[i].decode("ascii", "replace")[:1]
+        return result
+
+    def diff_added_lines(self, base: str, commit: str) -> dict[str, list[str]]:
+        """Map path -> lines added between ``base`` and ``commit``, for text files only.
+
+        Binary files (as git decides) are skipped. Paths come from a NUL-separated listing, so
+        names with spaces, quotes or newlines are exact; each file's patch is requested with a
+        literal pathspec. Same hardened invocation and plumbing as the other diff helpers."""
+        base, commit = self._require_commit(base), self._require_commit(commit)
+        out = self._diff_tree(base, commit, "--numstat")
+        result: dict[str, list[str]] = {}
+        for rec in out.split(b"\0"):
+            if not rec:
+                continue
+            added, _deleted, raw_path = rec.split(b"\t", 2)
+            if added in (b"-", b"0"):               # "-" marks a binary file
+                continue
+            path = os.fsdecode(raw_path)
+            patch = self._g(["diff-tree", "-r", "-p", "-U0", "--no-renames", "--no-ext-diff",
+                             "--no-textconv", "--no-color", base, commit, "--",
+                             ":(literal)" + path]).stdout
+            lines: list[str] = []
+            in_hunk = False
+            for raw in patch.split(b"\n"):
+                if raw.startswith(b"@@"):
+                    in_hunk = True
+                elif in_hunk and raw.startswith(b"+"):
+                    lines.append(raw[1:].decode("utf-8", "replace").rstrip("\r"))
+            result[path] = lines
+        return result

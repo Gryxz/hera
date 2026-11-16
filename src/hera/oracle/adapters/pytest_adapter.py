@@ -21,11 +21,13 @@ from ... import sandbox
 from ...types import CheckResult, CheckStatus
 from ...workspace import _rm_tree
 from ..checkstore import verify_integrity
-from ..model import CheckSet, PrepareReport, RunReport, module_name
+from ..model import CheckSet, PrepareReport, ProjectRunReport, RunReport, module_name
 
 CHECKS_DIR = "_hera_checks"
 RESULTS_DIR = "_hera_results"
 JUNIT_REL = f"{RESULTS_DIR}/junit.xml"
+PROJECT_DIR = "_hera_project"
+PROJECT_JUNIT_REL = f"{PROJECT_DIR}/junit.xml"
 SENTINEL_MODULE = f"{CHECKS_DIR}._sentinel.test_hera_sentinel"
 MUST_PASS, MUST_FAIL = "test_hera_must_pass", "test_hera_must_fail"
 MAX_RESULTS_BYTES = 5 * 1024 * 1024
@@ -39,6 +41,11 @@ _INI = ("[pytest]\n"
         "addopts = --import-mode=importlib --continue-on-collection-errors --tb=short\n"
         "python_files = test_*.py\n"
         "norecursedirs = __pycache__\n")
+
+_PROJECT_INI = ("[pytest]\n"
+                "pythonpath = .. ../src\n"
+                "addopts = --import-mode=importlib --continue-on-collection-errors --tb=short\n"
+                "norecursedirs = __pycache__\n")
 
 PROTECTED_GLOBS = (
     "conftest.py", "**/conftest.py", "pytest.ini", "tox.ini", "setup.cfg",
@@ -204,6 +211,52 @@ class PytestAdapter:
                          env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONSAFEPATH": "1"},
                          allow_unsandboxed=allow_unsandboxed, **kwargs)
         return _parse(checkout, checkset, include_hidden, rr)
+
+    # ---- the project's own pre-existing tests ----------------------------------------
+    def project_test_paths(self, base_tree: dict[str, bytes]) -> tuple[str, ...]:
+        """Test files of the project at base: ``*.py`` files of ``base_tree`` named ``test_*.py``
+        or ``*_test.py``. These are the oracle's choice of what 'the existing tests' means."""
+        out = []
+        for rel in sorted(base_tree):
+            name = rel.rsplit("/", 1)[-1]
+            if name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
+                out.append(rel)
+        return tuple(out)
+
+    def project_command(self, test_paths) -> list[str]:
+        return [sys.executable, "-P", "-m", "pytest", "-c", f"{PROJECT_DIR}/pytest.ini",
+                "--rootdir", ".", "--confcutdir", ".", "-p", "no:cacheprovider",
+                "-o", "junit_family=xunit2", f"--junitxml={PROJECT_JUNIT_REL}", "-q", *test_paths]
+
+    def run_project_tests(self, checkout, test_paths, *, limits=None,
+                          allow_unsandboxed: bool = False) -> ProjectRunReport:
+        """Run the project's pre-existing tests in ``checkout`` under the sandbox.
+
+        Unlike the check run, the project's own ``conftest.py`` files are loaded (they hold its
+        fixtures; ``prepare`` has restored them to base content, or the checkout is a base
+        checkout), with ``--confcutdir`` at the checkout root. Nothing from ``_hera_checks`` is
+        used: the oracle directories (frozen checks, results) are removed first and the ini is
+        oracle-owned, so the project's own configuration is never read."""
+        checkout = Path(checkout)
+        if not checkout.is_dir() or (checkout / ".git").exists():
+            raise ValueError("checkout must be a directory without .git")
+        test_paths = tuple(test_paths)
+        for rel in test_paths:
+            parts = rel.split("/")
+            if not rel or rel.startswith(("/", "-")) or any(p in ("", ".", "..") for p in parts):
+                raise ValueError("test_paths: must be relative POSIX paths")
+        for name in (CHECKS_DIR, RESULTS_DIR, PROJECT_DIR):
+            p = checkout / name
+            if os.path.lexists(p):
+                _remove(p)
+        pdir = checkout / PROJECT_DIR
+        pdir.mkdir()
+        (pdir / "pytest.ini").write_text(_PROJECT_INI, encoding="utf-8")
+        kwargs = {"limits": limits} if limits is not None else {}
+        rr = sandbox.run(self.project_command(test_paths), cwd=checkout,
+                         env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONSAFEPATH": "1"},
+                         allow_unsandboxed=allow_unsandboxed, **kwargs)
+        return _parse_project(checkout, rr)
 
     # ---- feedback --------------------------------------------------------------------
     def feedback_for_implementer(self, report: RunReport, checkset: CheckSet) -> list[dict]:
@@ -417,3 +470,44 @@ def _parse(checkout: Path, checkset: CheckSet, include_hidden: bool, rr) -> RunR
                      sentinels_ok=sentinels_ok, exit_code_consistent=consistent,
                      raw_unmatched=tuple(unmatched), results_parsed=root is not None,
                      failure_texts=texts, **base)
+
+
+def _parse_project(checkout: Path, rr) -> ProjectRunReport:
+    data = _read_results(checkout / PROJECT_JUNIT_REL)
+    root = None
+    if data is not None:
+        try:
+            root = ET.fromstring(data)
+        except ET.ParseError:
+            root = None
+    base = dict(returncode=rr.returncode, timed_out=rr.timed_out)
+    if root is None:
+        return ProjectRunReport(**base)
+    cases: dict[str, list[CheckStatus]] = {}
+    tally = {"pass": 0, "fail": 0, "skip": 0}
+    any_fail = False
+    for tc in root.iter("testcase"):
+        cls, name = tc.get("classname") or "", tc.get("name") or ""
+        status, _text = _status_of(tc)
+        tally["pass" if status is CheckStatus.PASS else "skip" if status is CheckStatus.SKIP else "fail"] += 1
+        any_fail = any_fail or status in (CheckStatus.FAIL, CheckStatus.ERROR)
+        cases.setdefault(f"{cls}::{name}" if cls else name, []).append(status)
+    statuses: dict[str, CheckStatus] = {}
+    for tid, sts in cases.items():
+        if CheckStatus.FAIL in sts:
+            statuses[tid] = CheckStatus.FAIL
+        elif CheckStatus.ERROR in sts:
+            statuses[tid] = CheckStatus.ERROR
+        elif all(s is CheckStatus.PASS for s in sts):
+            statuses[tid] = CheckStatus.PASS
+        else:
+            statuses[tid] = CheckStatus.SKIP
+    consistent = False
+    if not rr.timed_out and rr.returncode == (1 if any_fail else 0):
+        counts = _summary_counts(rr.stdout, rr.truncated)
+        if counts is not None:
+            consistent = (counts.get("passed", 0) + counts.get("xpassed", 0) == tally["pass"]
+                          and counts.get("failed", 0) + counts.get("error", 0) + counts.get("errors", 0)
+                          == tally["fail"]
+                          and counts.get("skipped", 0) + counts.get("xfailed", 0) == tally["skip"])
+    return ProjectRunReport(statuses=statuses, results_parsed=True, exit_code_consistent=consistent, **base)

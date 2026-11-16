@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from ..types import CheckResult
+from ..types import CheckResult, CheckStatus
 
 _REQ_ID = re.compile(r"R-[0-9]{1,4}")
 _CHECK_ID = re.compile(r"[A-Za-z0-9_.-]{1,80}")
@@ -160,3 +160,16 @@ class RunReport:
     # check_id -> failure text (capped). Internal: never hand hidden entries to an implementer;
     # use PytestAdapter.feedback_for_implementer.
     failure_texts: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ProjectRunReport:
+    """Result of running the project's own pre-existing tests (no frozen checks involved).
+
+    statuses: test id (``classname::name``; a collection error is the module name alone) to
+    status. ``exit_code_consistent`` uses the same cross-check as the check run."""
+    statuses: dict[str, "CheckStatus"] = field(default_factory=dict)
+    results_parsed: bool = False
+    exit_code_consistent: bool = False
+    returncode: int | None = None
+    timed_out: bool = False
