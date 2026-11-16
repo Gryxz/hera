@@ -322,17 +322,32 @@ def test_a_background_process_cannot_tamper_with_a_later_check(conn, hera_home, 
 
 @needs_mech
 def test_a_candidate_cannot_read_the_frozen_hidden_contract_file_from_disk(conn, hera_home, toy):
-    calc = CORRECT_CALC + (
-        "\n\ndef steal():\n    import os\n    found = []\n"
-        "    for d, ds, fs in os.walk('/'):\n"
-        "        ds[:] = [x for x in ds if os.path.join(d, x) not in ('/proc', '/sys', '/dev')]\n"
-        "        found += [os.path.join(d, f) for f in fs if f.endswith('.contract.toml')]\n"
-        "    print(found)\n")
-    files = {"x.contract.toml": cfile(("steal", "import calc; calc.steal()", 'stdout_contains = ["__never__"]'))}
+    """Strongest form: the candidate is told the exact path of the frozen hidden file and also
+    searches the places a store could live (temp and home). Under a real mechanism it must find
+    and read nothing. (Walking '/' is avoided: on CI runners it exceeds any sensible timeout.)"""
+    from hera.oracle.checkstore import hidden_dir
+    files = {"x.contract.toml": cfile(("steal", "import calc; calc.steal()", 'stdout_contains = ["__never__"]',
+                                       "timeout_s = 60\n"))}
+    hidden = {"hidden_zq.contract.toml": CONTRACT_FILES["hidden_zq.contract.toml"]}
     cs = mk(conn, [dc("c1", "steal", "x.contract.toml"), dc("c2", "parse_seven", "hidden_zq.contract.toml", vis="hidden")],
-            {**files, "hidden_zq.contract.toml": CONTRACT_FILES["hidden_zq.contract.toml"]})
+            {**files, **hidden})
+    target = str(hidden_dir(cs) / "hidden_zq.contract.toml")
+    assert open(target).read()                     # the file exists and the test process can read it
+    calc = CORRECT_CALC + (
+        "\n\ndef steal():\n    import os, tempfile\n"
+        f"    target = {target!r}\n"
+        "    try:\n        open(target).read()\n        print('READ-OK')\n"
+        "    except OSError as e:\n        print('DENIED', type(e).__name__)\n"
+        "    found = []\n"
+        "    for root in {tempfile.gettempdir(), '/tmp', os.path.expanduser('~')}:\n"
+        "        for d, ds, fs in os.walk(root):\n"
+        "            found += [f for f in fs if f.endswith('.contract.toml')]\n"
+        "    print('FOUND', sorted(found))\n")
     rep = run_on(toy, cs, toy.candidate({"calc.py": calc}))
-    assert "[]" in rep.failure_texts["c1"].split("stdout (first 2000 characters):\n")[1].split("\n")[0]
+    text = rep.failure_texts["c1"]
+    assert "DENIED" in text and "READ-OK" not in text
+    assert "FOUND []" in text and "hidden_zq" not in text.split("FOUND", 1)[1]
+
 
 
 # ---- integrity, freeze-time rules --------------------------------------------------------------------------------
