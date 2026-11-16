@@ -3,7 +3,7 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -48,3 +48,9 @@ def migrate(conn: sqlite3.Connection) -> None:
             "tool_results_json TEXT, checkpoint_commit TEXT, usd REAL, created_at REAL, "
             "PRIMARY KEY(attempt_id, seq));"
             "PRAGMA user_version=4;COMMIT;")
+    if version < 5:      # task orchestrator: one row per decision of the recovery ladder (resume)
+        conn.executescript(
+            "BEGIN;CREATE TABLE IF NOT EXISTS task_events ("
+            "task_id TEXT NOT NULL, seq INTEGER NOT NULL, at REAL, kind TEXT NOT NULL, detail_json TEXT, "
+            "PRIMARY KEY(task_id, seq));"
+            "PRAGMA user_version=5;COMMIT;")

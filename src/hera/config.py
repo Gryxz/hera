@@ -41,6 +41,18 @@ class ProviderSpec:
     send_store_false: bool = False
 
 
+_RECOVERY_KEYS = ("max_retries", "max_candidates_per_tier", "max_turns", "max_tokens")
+
+
+@dataclass(frozen=True)
+class RecoveryLimits:
+    """Hard limits of the recovery ladder (``[recovery]`` in hera.toml); see docs/AGENT.md."""
+    max_retries: int = 2               # retries of one candidate in the same conversation
+    max_candidates_per_tier: int = 2   # fresh candidates per tier
+    max_turns: int = 30                # model turns in one attempt
+    max_tokens: int = 4096             # per model reply
+
+
 @dataclass(frozen=True)
 class Config:
     budget: Budget
@@ -49,6 +61,24 @@ class Config:
     models: dict[str, str]
     local_model: dict
     providers: dict[str, ProviderSpec] = field(default_factory=dict)
+    recovery: RecoveryLimits = field(default_factory=RecoveryLimits)
+
+
+def _recovery(raw) -> RecoveryLimits:
+    if not isinstance(raw, dict):
+        raise ValueError("recovery: must be a table")
+    unknown = set(raw) - set(_RECOVERY_KEYS)
+    if unknown:
+        raise ValueError(f"recovery: unknown setting(s): {', '.join(sorted(unknown))}")
+    vals = {}
+    for key in _RECOVERY_KEYS:
+        if key in raw:
+            v = raw[key]
+            low = 0 if key == "max_retries" else 1
+            if not isinstance(v, int) or isinstance(v, bool) or v < low:
+                raise ValueError(f"recovery.{key}: must be an integer of at least {low}")
+            vals[key] = v
+    return RecoveryLimits(**vals)
 
 
 def _provider_spec(name: str, raw) -> ProviderSpec:
@@ -82,4 +112,5 @@ def load(path: Path) -> Config:
     return Config(budget=Budget(**raw.get("budget", {})), prices=tiers,
                   prices_as_of=prices.get("as_of", ""), models=raw.get("models", {}),
                   local_model=raw.get("local_model", {}),
-                  providers={n: _provider_spec(n, v) for n, v in raw.get("providers", {}).items()})
+                  providers={n: _provider_spec(n, v) for n, v in raw.get("providers", {}).items()},
+                  recovery=_recovery(raw.get("recovery", {})))

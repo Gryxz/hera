@@ -34,6 +34,12 @@ output = 0.0
 cache_read = 0.0
 cache_write = 0.0
 
+[recovery]                     # hard limits of the recovery ladder (the defaults); see docs/AGENT.md
+max_retries = 2                # retries of one candidate in the same conversation
+max_candidates_per_tier = 2    # fresh candidates per tier
+max_turns = 30                 # model turns in one attempt
+max_tokens = 4096              # per model reply
+
 [models]                       # fill in the exact dated model identifiers you use
 cheap = ""
 default = ""
@@ -56,6 +62,11 @@ model = ""                    # exact dated model id
 key_env = "ANTHROPIC_API_KEY" # name of the environment variable; the key itself is never in a file
 tier = "default"              # must have a price under [prices.tiers]
 extra_headers = { "anthropic-version" = "2023-06-01" }
+
+# Optional extra roles the ladder uses by NAME: `default_alt` (a second default-tier provider for a
+# fresh candidate after OVERFIT or TAMPER) and `strong` (diagnosis and escalation; tier "strong").
+# [providers.default_alt]
+# [providers.strong]
 
 # An OpenAI-compatible endpoint on this machine (llama-server and similar): loopback only, tier
 # "local" (free, exempt from spending caps), no key.
