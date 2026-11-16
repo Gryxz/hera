@@ -76,7 +76,11 @@ def test_protected_path_deleted(toy):
     "_hera_results/junit.xml", "_HERA_CHECKS/x.py", "Conftest.py"])
 def test_protected_path_added_blocks(toy, path):
     a = run_audit(toy, {path: "x = 1\n"})
-    assert ("protected_path_added", path) in rules(a.block)
+    found = rules(a.block)
+    # On a case-insensitive file system (macOS default) writing "Conftest.py" lands on the
+    # existing "conftest.py", so the same act shows up as a modification. Either way it blocks.
+    assert ("protected_path_added", path) in found or (
+        ("protected_path_modified", path.lower()) in found and path != path.lower())
 
 
 @pytest.mark.parametrize("path", ["pkg/pytest.ini", "pkg/tox.ini", "pkg/pytest_helper.py", "pytest_dir/mod.py", "src/mod.py"])
