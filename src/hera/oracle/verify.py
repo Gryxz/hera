@@ -173,7 +173,9 @@ def attribute(v: Verdict, *, results, audit_report: AuditReport, results_parsed:
         advisories = (AttributionRecord(Attribution.CHECK_WEAK, "low", "weak_check_counted",
                                         {"checks": weak}),)
     if not timed_out and not results_parsed and not audit_report.block and v is not Verdict.ORACLE_DISPUTED:
-        return (AttributionRecord(Attribution.ENV_FAILURE, "medium", "no_results_parsed",
+        # The runner produced nothing. That can be a broken environment or a candidate that killed
+        # the runner; nothing here proves which, so neither the environment nor the model is blamed.
+        return (AttributionRecord(Attribution.UNKNOWN, "low", "no_results_parsed",
                                   {"verdict": v.value}), True, advisories)
     if v is Verdict.TAMPER:
         if audit_report.block:

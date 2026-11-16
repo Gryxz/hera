@@ -221,12 +221,12 @@ def test_KNOWN_GAP_in_process_monkeypatch_yields_false_pass(conn, toy, cs):
 
 
 # ---- environment, health, scope of the run ----------------------------------------------------
-def test_a_candidate_that_kills_the_runner_is_tamper_with_env_attribution(conn, toy, cs):
+def test_a_candidate_that_kills_the_runner_is_tamper_with_unknown_attribution(conn, toy, cs):
     """The runner produces no results at all. The verdict is TAMPER (fail safe) but the attribution
-    is ENV_FAILURE with environment_suspect, because nothing proves who caused it."""
+    is UNKNOWN with environment_suspect: a broken environment looks the same, so nobody is blamed."""
     commit = toy.candidate({"calc.py": "import os\nos._exit(3)\n"})
     out = run(conn, toy, cs, commit)
-    assert out.verdict is V.TAMPER and out.attribution.label is A.ENV_FAILURE and out.environment_suspect
+    assert out.verdict is V.TAMPER and out.attribution.label is A.UNKNOWN and out.environment_suspect
     assert out.attribution.rule == "no_results_parsed" and not out.timed_out and out.audit.block == ()
 
 

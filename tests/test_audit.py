@@ -228,3 +228,16 @@ def test_diff_rules_and_prepare_agree_on_real_tampering(toy, conn, hera_home):
     assert with_prep == plain
     assert {r for r, _p in rules(plain.block)} == {"protected_path_modified", "protected_path_added",
                                                    "protected_path_deleted"}
+
+
+def test_git_attributes_cannot_hide_added_lines_from_the_audit(toy):
+    """The bare repository is shared with implementer worktrees, so its `info/attributes` is
+    implementer-writable. A `-diff` (binary) attribute there, or in a committed `.gitattributes`,
+    must not blind the line-based rules."""
+    info = toy.repo.bare / "info"
+    info.mkdir(exist_ok=True)
+    (info / "attributes").write_text("*.py -diff\n*.py binary\n")
+    ops = {".gitattributes": "*.py -diff\n*.py binary\n",
+           "src/mod.py": "import pytest\n@pytest.mark.skip\ndef f():\n    breakpoint()\n"}
+    rules_found = {f.rule for f in run_audit(toy, ops).flags}
+    assert {"skip_marker_added", "debris"} <= rules_found

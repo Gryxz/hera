@@ -164,7 +164,7 @@ evidence. A timeout never becomes TAMPER unless the audit blocks.
 
 | Condition | Label (confidence, rule) |
 |---|---|
-| no results parsed, not timed out, no audit block | `ENV_FAILURE` (medium, `no_results_parsed`), `environment_suspect=True`, verdict left as computed |
+| no results parsed, not timed out, no audit block | `UNKNOWN` (low, `no_results_parsed`), `environment_suspect=True`, verdict left as computed — a broken environment and a candidate that kills the runner look the same here, so neither is blamed |
 | TAMPER | `IMPL_TAMPER` (high `audit_block`; medium `result_integrity`) |
 | OVERFIT | `IMPL_OVERFIT` (high, `unseen_case_failed`) |
 | FAIL | `IMPL_WRONG` (high, `visible_check_failed`; medium when timed out) |
@@ -216,7 +216,7 @@ false PASS and must be flipped when out-of-process checks land.
 Other limits of S7b: the project's third-party pytest plugins are not loaded; git attributes in the
 shared bare repository's `info/attributes` (writable from an implementer worktree) could make git treat
 a file as binary and hide its added lines from the line rules; a candidate that kills the runner is
-attributed `ENV_FAILURE` although its verdict is TAMPER.
+attributed `UNKNOWN` (with `environment_suspect`) although its verdict is TAMPER.
 
 ## Not yet built
 

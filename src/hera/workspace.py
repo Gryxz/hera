@@ -464,22 +464,26 @@ class TaskRepo:
     def diff_added_lines(self, base: str, commit: str) -> dict[str, list[str]]:
         """Map path -> lines added between ``base`` and ``commit``, for text files only.
 
-        Binary files (as git decides) are skipped. Paths come from a NUL-separated listing, so
+        Every file is diffed as text (``--text``), so a ``-diff`` attribute planted in a committed
+        ``.gitattributes`` or in the shared repository's ``info/attributes`` cannot hide added
+        lines from the audit. Files whose patch contains a NUL byte are treated as binary and
+        skipped. Paths come from a NUL-separated listing, so
         names with spaces, quotes or newlines are exact; each file's patch is requested with a
         literal pathspec. Same hardened invocation and plumbing as the other diff helpers."""
         base, commit = self._require_commit(base), self._require_commit(commit)
-        out = self._diff_tree(base, commit, "--numstat")
+        # `--numstat` ignores `--text` and reports attribute-marked files as binary, so the file
+        # list comes from `--name-only` and binary detection from the patch bytes themselves.
+        out = self._diff_tree(base, commit, "--name-only", "--diff-filter=AMT")
         result: dict[str, list[str]] = {}
-        for rec in out.split(b"\0"):
-            if not rec:
-                continue
-            added, _deleted, raw_path = rec.split(b"\t", 2)
-            if added in (b"-", b"0"):               # "-" marks a binary file
+        for raw_path in out.split(b"\0"):
+            if not raw_path:
                 continue
             path = os.fsdecode(raw_path)
-            patch = self._g(["diff-tree", "-r", "-p", "-U0", "--no-renames", "--no-ext-diff",
+            patch = self._g(["diff-tree", "-r", "-p", "-U0", "--text", "--no-renames", "--no-ext-diff",
                              "--no-textconv", "--no-color", base, commit, "--",
                              ":(literal)" + path]).stdout
+            if b"\0" in patch:                     # binary content: nothing line-based to audit
+                continue
             lines: list[str] = []
             in_hunk = False
             for raw in patch.split(b"\n"):
