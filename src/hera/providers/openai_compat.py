@@ -7,8 +7,8 @@ lives in the Destination's headers, never here.
 from __future__ import annotations
 import json
 from typing import Sequence
-from ..types import ModelReply, Usage
-from .base import BaseProvider, Message, ProviderError
+from ..types import ModelReply, ToolCall, Usage
+from .base import BaseProvider, Message, ProviderError, args_text, make_tool_call
 
 _ALLOWED = ("temperature", "top_p", "stop", "tool_choice", "chat_template_kwargs",
             "reasoning_effort", "max_completion_tokens")
@@ -23,8 +23,7 @@ class OpenAICompatProvider(BaseProvider):
                options: dict) -> bytes:
         opts = {k: v for k, v in options.items() if k in _ALLOWED and v is not None}
         body: dict = {"model": self.model_id,
-                      "messages": [{"role": m.role, "content": m.data.decode("utf-8")}
-                                   for m in messages]}
+                      "messages": [self._wire_message(m) for m in messages]}
         if "max_completion_tokens" in opts:
             body["max_completion_tokens"] = opts.pop("max_completion_tokens")
         else:
@@ -36,6 +35,33 @@ class OpenAICompatProvider(BaseProvider):
             body["store"] = False
         body.update(opts)
         return json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+    @staticmethod
+    def _wire_message(m: Message) -> dict:
+        text = m.data.decode("utf-8")
+        if m.role == "tool":
+            return {"role": "tool", "tool_call_id": m.tool_call_id, "content": text}
+        if m.role == "assistant" and m.tool_calls:
+            return {"role": "assistant", "content": text,
+                    "tool_calls": [{"id": c.id, "type": "function",
+                                    "function": {"name": c.name, "arguments": args_text(c)}}
+                                   for c in m.tool_calls]}
+        return {"role": m.role, "content": text}
+
+    def render_tools(self, specs: Sequence[dict]) -> list[dict]:
+        return [{"type": "function",
+                 "function": {"name": t["name"], "description": t.get("description", ""),
+                              "parameters": t["parameters"]}} for t in specs]
+
+    def normalise_tool_calls(self, reply: ModelReply) -> tuple[ToolCall, ...]:
+        out: list[ToolCall] = []
+        seen: set[str] = set()
+        for i, raw in enumerate(reply.tool_calls):
+            fn = raw.get("function") if isinstance(raw, dict) else None
+            fn = fn if isinstance(fn, dict) else {}
+            out.append(make_tool_call(i, raw.get("id") if isinstance(raw, dict) else None,
+                                      fn.get("name"), fn.get("arguments"), seen))
+        return tuple(out)
 
     def _parse(self, body: bytes) -> ModelReply:
         try:

@@ -3,7 +3,7 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -36,3 +36,15 @@ def migrate(conn: sqlite3.Connection) -> None:
             "argument TEXT, status TEXT NOT NULL DEFAULT 'open', outcome TEXT, resolver TEXT, "
             "new_checkset_hash TEXT, opened_at REAL, resolved_at REAL);"
             "PRAGMA user_version=3;COMMIT;")
+    if version < 4:      # agent loop: one row per implementer attempt, one per model turn (resume)
+        conn.executescript(
+            "BEGIN;CREATE TABLE IF NOT EXISTS attempts ("
+            "id TEXT PRIMARY KEY, task_id TEXT NOT NULL, seq INTEGER NOT NULL, tier TEXT, provider TEXT, "
+            "model_id TEXT, candidate TEXT, status TEXT NOT NULL, base_commit TEXT, final_commit TEXT, "
+            "summary TEXT, declared_scope_json TEXT, twin_pattern TEXT, started_at REAL, ended_at REAL, "
+            "UNIQUE(task_id, seq));"
+            "CREATE TABLE IF NOT EXISTS turns ("
+            "attempt_id TEXT NOT NULL, seq INTEGER NOT NULL, request_sha256 TEXT NOT NULL, reply_json TEXT, "
+            "tool_results_json TEXT, checkpoint_commit TEXT, usd REAL, created_at REAL, "
+            "PRIMARY KEY(attempt_id, seq));"
+            "PRAGMA user_version=4;COMMIT;")

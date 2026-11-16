@@ -177,6 +177,16 @@ class Worktree:
         return self.head()
 
 
+    def reset_to(self, commit: str) -> str:
+        """Make the worktree and its branch exactly ``commit``: tracked files restored, untracked and
+        ignored files removed. Used to resume an attempt from its last checkpoint."""
+        commit = _check_hash(commit)
+        self.task._require_commit(commit)
+        self._git(["reset", "--hard", "--quiet", commit])
+        self._git(["clean", "-ffdxq"])
+        return self.head()
+
+
 class TaskRepo:
     def __init__(self, task_id: str, base_commit: str):
         self.task_id = _check_id(task_id, "task id")

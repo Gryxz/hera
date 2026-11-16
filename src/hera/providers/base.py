@@ -6,21 +6,93 @@ Order of one call: build body -> consistency check -> budget check (nothing sent
 """
 from __future__ import annotations
 import json
+import re
 from dataclasses import dataclass
 from typing import Sequence
 from ..config import TierPrice
 from ..ledger import Ledger
 from ..privacy.gateway import Gateway, Segment
-from ..types import ModelReply, Usage
+from ..types import ModelReply, ToolCall, Usage
+
+_ID_OK = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+INVALID_TOOL = "__invalid__"
+CALLS_SUFFIX = "#calls"
+_RAW_CAP = 4000
 
 
 @dataclass(frozen=True)
 class Message:
     """One chat message. `artefact_id` must name a labelled artefact whose content is `data`
-    (for a local destination the label is not required)."""
+    (for a local destination the label is not required).
+
+    ``tool_call_id`` is set on role "tool" messages (the result of one tool call).
+    ``tool_calls`` (tuple of ToolCall) is set on role "assistant" messages that asked for tools; the
+    calls are HERA's rendering of what the model sent and travel as a second labelled artefact,
+    ``calls_artefact_id(message)``, whose content is ``render_calls_artefact(message.tool_calls)``."""
     role: str
     artefact_id: str
     data: bytes
+    tool_call_id: str = ""
+    tool_calls: tuple = ()
+
+
+def calls_artefact_id(m: Message) -> str:
+    return m.artefact_id + CALLS_SUFFIX
+
+
+def args_text(call: ToolCall) -> str:
+    """The exact JSON text of a call's arguments as every adapter encodes it."""
+    return json.dumps(call.arguments, ensure_ascii=False)
+
+
+def _string_leaves(obj, out: list[str]) -> None:
+    if isinstance(obj, str):
+        out.append(obj)
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            _string_leaves(k, out)
+            _string_leaves(v, out)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            _string_leaves(v, out)
+
+
+def render_calls_artefact(calls: Sequence[ToolCall]) -> bytes:
+    """Content of the labelled artefact that stands for an assistant message's tool calls: one JSON
+    line per call (what the wire carries), then every string inside the arguments as raw text, so
+    scanners see line starts and quotes exactly as written rather than JSON-escaped."""
+    lines = [json.dumps({"id": c.id, "name": c.name, "arguments": c.arguments}, ensure_ascii=False)
+             for c in calls]
+    leaves: list[str] = []
+    for c in calls:
+        _string_leaves(c.arguments, leaves)
+    return "\n".join(lines + leaves).encode("utf-8")
+
+
+def make_tool_call(index: int, call_id, name, arguments, seen: set[str]) -> ToolCall:
+    """Normalise one call. Odd ids become ``call_<n>``; unparseable arguments or an odd name become
+    a ToolCall named "__invalid__" whose arguments hold the raw text (capped)."""
+    cid = call_id if isinstance(call_id, str) and _ID_OK.fullmatch(call_id) and call_id not in seen \
+        else f"call_{index}"
+    while cid in seen:
+        cid += "_"
+    seen.add(cid)
+    if not (isinstance(name, str) and _ID_OK.fullmatch(name)) or name == INVALID_TOOL:
+        raw = arguments if isinstance(arguments, str) else json.dumps(arguments, default=str)
+        return ToolCall(cid, INVALID_TOOL, {"raw": str(raw)[:_RAW_CAP]})
+    if isinstance(arguments, str):
+        if not arguments.strip():
+            parsed = {}
+        else:
+            try:
+                parsed = json.loads(arguments)
+            except ValueError:
+                return ToolCall(cid, INVALID_TOOL, {"raw": arguments[:_RAW_CAP]})
+    else:
+        parsed = arguments
+    if not isinstance(parsed, dict):
+        return ToolCall(cid, INVALID_TOOL, {"raw": json.dumps(parsed, default=str)[:_RAW_CAP]})
+    return ToolCall(cid, name, parsed)
 
 
 class ProviderBlocked(Exception):
@@ -78,17 +150,35 @@ class BaseProvider:
     def _parse(self, body: bytes) -> ModelReply:
         raise NotImplementedError
 
+    def render_tools(self, specs: Sequence[dict]) -> list[dict]:
+        """Neutral specs {"name","description","parameters"} -> this provider's ``tools`` shape."""
+        raise NotImplementedError
+
+    def normalise_tool_calls(self, reply: ModelReply) -> tuple[ToolCall, ...]:
+        """The reply's tool calls as ToolCall objects (see ``make_tool_call``)."""
+        raise NotImplementedError
+
+    def _args_in_body(self, call: ToolCall, body_text: str) -> bool:
+        """Is the call's argument text JSON-encoded in the request body? Default: the arguments
+        travel as a JSON *string* (OpenAI style), so they appear escaped."""
+        return _body_contains(body_text, args_text(call))
+
     # -- shared flow
     def complete(self, messages: Sequence[Message], *, max_tokens: int, task_id: str | None = None,
                  purpose: str = "implement", tools: Sequence = (), **options) -> ModelReply:
         messages = list(messages)
+        self._validate(messages)
         body = self._build(messages, max_tokens, tools, options)
         self._check_body(messages, body)
         price = self.ledger.prices[self.tier]
         self.ledger.check(task_id=task_id, tier=self.tier,
                           estimate_usd=estimate_usd(price, len(body), max_tokens))
-        result = self.gateway.send(self.destination_name,
-                                   [Segment(m.artefact_id, m.data) for m in messages],
+        segments: list[Segment] = []
+        for m in messages:
+            segments.append(Segment(m.artefact_id, m.data))
+            if m.tool_calls:
+                segments.append(Segment(calls_artefact_id(m), render_calls_artefact(m.tool_calls)))
+        result = self.gateway.send(self.destination_name, segments,
                                    purpose=purpose, task_id=task_id, envelope=lambda segs: body)
         if not result.sent:
             raise ProviderBlocked(result.reason)
@@ -115,10 +205,26 @@ class BaseProvider:
         return reply
 
     @staticmethod
-    def _check_body(messages: Sequence[Message], body: bytes) -> None:
+    def _validate(messages: Sequence[Message]) -> None:
+        for m in messages:
+            if m.tool_calls and m.role != "assistant":
+                raise ProviderError("tool calls on a message that is not from the assistant")
+            if m.role == "tool" and not _ID_OK.fullmatch(m.tool_call_id or ""):
+                raise ProviderError("tool message without a valid tool call id")
+            if m.role != "tool" and m.tool_call_id:
+                raise ProviderError("tool call id on a message that is not a tool result")
+
+    def _check_body(self, messages: Sequence[Message], body: bytes) -> None:
         try:
             text = body.decode("utf-8")
-            ok = all(_body_contains(text, m.data.decode("utf-8")) for m in messages)
+            ok = True
+            for m in messages:
+                ok = ok and _body_contains(text, m.data.decode("utf-8"))
+                if m.tool_call_id:
+                    ok = ok and _body_contains(text, m.tool_call_id)
+                for c in m.tool_calls:
+                    ok = ok and (_body_contains(text, c.id) and _body_contains(text, c.name)
+                                 and self._args_in_body(c, text))
         except UnicodeError:
             ok = False
         if not ok:

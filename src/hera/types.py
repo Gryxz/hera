@@ -112,3 +112,12 @@ class ModelReply:
     model_id: str = ""
     tool_calls: tuple = ()
     usage_reported: bool = True
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A tool call the model asked for, normalised across wire formats. ``name`` is
+    "__invalid__" when the model's arguments could not be parsed (raw text in arguments["raw"])."""
+    id: str
+    name: str
+    arguments: dict

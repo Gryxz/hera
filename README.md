@@ -4,7 +4,7 @@ A coordinator that gets coding tasks done by AI models and only calls them done 
 
 Private project for a group of four. Each member runs their own copy.
 
-> **Status: milestone 0.1, step 7c of 10 is built (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox, and the acceptance oracle: checks, frozen check store, pytest adapter, contract checks, check validation, diff audit, verification receipts, verdicts, attribution, redacted feedback and disputes); S5 (local model host) is deferred until someone has a Mac, and S4 and S7c are pending review.** The in-process tamper route is closed for contract checks (declarative checks run out of process, compared by the oracle) and still open for native pytest checks: a candidate that monkeypatches pytest gets a false `PASS` from a pytest-only check set (documented, tested; `in_process_only` in the verify outcome shows which requirements rest only on such checks; see docs/ORACLE.md). Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can open a network connection and the provider adapters are exercised against loopback mock servers only. Next up is step S8. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+> **Status: milestone 0.1, step 8a of 10 is built (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox, the acceptance oracle: checks, frozen check store, pytest adapter, contract checks, check validation, diff audit, verification receipts, verdicts, attribution, redacted feedback and disputes, and now the implementer loop: tools, tool calls through the providers, per-turn records that let a crash resume without repeating a paid call, providers from configuration); S5 (local model host) is deferred until someone has a Mac, and S4, S7c and S8a are pending review.** The in-process tamper route is closed for contract checks (declarative checks run out of process, compared by the oracle) and still open for native pytest checks: a candidate that monkeypatches pytest gets a false `PASS` from a pytest-only check set (documented, tested; `in_process_only` in the verify outcome shows which requirements rest only on such checks; see docs/ORACLE.md). Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can open a network connection and the provider adapters and the agent loop are exercised against loopback mock servers only. Next up is step S8b (recovery ladder and `hera run`). See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ---
 
@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 668 tests; 9 skip where no sandbox mechanism is available
+pytest -q                       # 774 tests; 10 skip where no sandbox mechanism is available
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -78,6 +78,7 @@ Around that loop:
 | `src/hera/privacy/gateway.py` | The only network client; fail-closed; logs every send and block | done |
 | `src/hera/privacy/scanners/` | Second-line scanners: secrets, personal-data shapes, data-file sniffing, deny-list terms; see `docs/SCANNERS.md` | done (v0) |
 | `src/hera/providers/` | OpenAI-compatible and Anthropic Messages adapters; build and parse JSON only, every request goes through the gateway; see `docs/PROVIDERS.md` | done (mock servers only) |
+| `src/hera/providers/registry.py` | Providers built from `[providers.<name>]` in `hera.toml`; the key comes from the environment variable the section names; a missing key leaves the provider out with a reason | done (mock servers only) |
 | `src/hera/providers/grok.py` | xAI (Grok) adapter on the OpenAI-compatible base | done (mock servers only) |
 | `src/hera/workspace.py` | Bare repository per task, worktree per candidate, verification checkout from a commit hash with no `.git`; hardened git | done |
 | `src/hera/sandbox.py` | Run candidate code with no network, scrubbed environment, limits and a narrow filesystem (`sandbox-exec` / `bwrap`); see `docs/SANDBOX.md` | done (macOS path untested by author) |
@@ -91,14 +92,17 @@ Around that loop:
 | `src/hera/oracle/audit.py` | Diff audit: protected paths, skip markers, declared scope, debris, dependency manifests, twin search; folds in what `prepare` undid | done |
 | `src/hera/oracle/verify.py` | Verify a commit: audit, pytest and contract check runs, regressions against the base-commit run of the project's own tests, receipt, verdict, attribution, persistence, redacted feedback, `in_process_only` | done (native pytest checks still forgeable in-process) |
 | `src/hera/oracle/disputes.py` | Disputes about visible checks; independent resolution; schema version 3 | done |
+| `src/hera/agent/tools.py` | The implementer's tools (files, literal search, sandboxed commands, visible checks, submit, dispute); path rules; every result labelled by the repository's class; see `docs/AGENT.md` | done (mock providers only) |
+| `src/hera/agent/prompts.py` | The implementer's fixed rules and first messages | done |
+| `src/hera/agent/loop.py` | `run_attempt`: the tool loop, per-turn records (`attempts`, `turns`), resume without repeated requests, end statuses | done (mock providers only) |
 | `src/hera/types.py` | Shared data types and enums | done |
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
-| `src/hera/cli.py` | `hera init`, `hera status`, `hera verify` | done |
+| `src/hera/cli.py` | `hera init`, `hera status`, `hera verify`, `hera providers list`, `hera providers check <name>` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks and an invented toy project (`toyrepo.py`) | 668 (9 need a sandbox mechanism) |
+| `tests/` | One test file per module, plus portability checks and an invented toy project (`toyrepo.py`) | 774 (10 need a sandbox mechanism) |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
-Not built yet: local model host, check authoring by models, requirements approval screen, agent loop, recovery, attribution learning ledger.
+Not built yet: local model host, check authoring by models, requirements approval screen, recovery ladder and `hera run` (S8b), attribution learning ledger.
 
 ## Rules — please do not break these
 
@@ -122,15 +126,25 @@ Not built yet: local model host, check authoring by models, requirements approva
 - Commit messages: what changed and why, in plain sentences.
 - One build-plan step per pull request where practical; update the step's status in `docs/BUILD_PLAN.md` in the same pull request.
 
-## Next step: S8 — agent loop and recovery
+## First real call
 
-Built through S7c: check objects, frozen check store, pytest adapter and out-of-process contract checks, validation, diff audit, verify → receipt → verdict → attribution, redacted feedback, disputes, `hera verify`. Build now:
-- A tool loop for the implementer model: the tool scope comes from the task's grants, and every tool result goes through the gateway before a model sees it.
-- A recovery ladder: retry twice, then a strong-tier diagnosis, then escalation; a fresh candidate after `OVERFIT` or `TAMPER`.
-- Checkpoint and resume after sleep or a crash, without repeating paid calls.
-- A budget cap ends a task as budget-censored, not as a failure.
+No real provider call has been made yet. When a member has an account:
 
-Done when you can kill the process mid-task and resume without repeating paid calls, and a budget cap ends a task as budget-censored. It can be built and tested against mock providers, but it only becomes meaningful with one real provider call.
+1. Copy `config/hera.example.toml` to `<HERA_HOME>/hera.toml` and fill in `[providers.<name>]`: `kind`, `url`, the exact dated `model` id, `tier` and `key_env`, the NAME of an environment variable. The key itself never goes in a file.
+2. Set that variable in your shell (`export ANTHROPIC_API_KEY=...`) and run `hera providers list`: the provider should show `key present: yes`.
+3. Run `hera providers check <name>`. It sends the fixed prompt "Reply with the single word: ready" through the gateway and prints the reply, the tokens and the dollars; exit status 0 means it worked. Then `hera status` shows the call and its cost.
+
+Expect to fix small wire-format differences on this first call, especially for tool calls (see `docs/AGENT.md`).
+
+## Next step: S8b — recovery ladder and `hera run`
+
+Built through S8a: the implementer loop (`run_attempt`), its tools, tool calls through both provider formats, per-turn records and resume, providers from configuration. Build now, on top of `run_attempt`:
+- A recovery ladder over attempts: retry twice, then a strong-tier diagnosis, then escalation; a fresh candidate after `OVERFIT` or `TAMPER`.
+- Filing a `disputed` attempt with `oracle.disputes.open_dispute`.
+- The closure over `oracle.verify(..., include_hidden=False)` that `run_visible_checks` calls.
+- `hera run`: objective to verdict, ending as budget-censored when a cap is reached.
+
+Done when a task runs from objective to verdict with recovery and a budget cap ends it as budget-censored. It can be built and tested against mock providers, but it only becomes meaningful with one real provider call.
 
 Still open from S7b/S7c: requirements summary and approval screen (terminal); two blind check authors; author hidden checks as contract checks wherever the task has an external surface (check authoring by models is not built).
 
