@@ -261,3 +261,10 @@ tier = "default"
         assert "cap reached" in capsys.readouterr().err and llm.requests == []
     finally:
         llm.close()
+
+
+def test_a_provider_named_local_is_refused_with_a_clear_reason(parts):
+    gw, ledger = parts
+    got = build_providers(cfg(local=dict(kind="openai_compat", url="http://127.0.0.1:9/v1/x", model="m",
+                                         local=True, tier="local")), gw, ledger, env={})
+    assert "local" not in got and "reserved" in got.absent["local"]

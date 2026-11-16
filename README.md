@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 841 tests; 10 skip where no sandbox mechanism is available
+pytest -q                       # 842 tests; 10 skip where no sandbox mechanism is available
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -101,7 +101,7 @@ Around that loop:
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
 | `src/hera/cli.py` | `hera init`, `hera status`, `hera verify`, `hera providers list`, `hera providers check <name>`, `hera checks freeze`, `hera run`, `hera task status` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks and an invented toy project (`toyrepo.py`) | 841 (10 need a sandbox mechanism) |
+| `tests/` | One test file per module, plus portability checks and an invented toy project (`toyrepo.py`) | 842 (10 need a sandbox mechanism) |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
 Not built yet: local model host, check authoring by models, requirements approval screen, the attribution learning ledger and `UNKNOWN`-rate report (S9).
