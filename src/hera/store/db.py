@@ -3,7 +3,7 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -29,3 +29,10 @@ def migrate(conn: sqlite3.Connection) -> None:
     if version < 2:      # grants.declassified: only such grants can release sensitive-origin text
         conn.executescript("BEGIN;ALTER TABLE grants ADD COLUMN declassified INTEGER NOT NULL DEFAULT 0;"
                            "PRAGMA user_version=2;COMMIT;")
+    if version < 3:      # disputes: an implementer or reviewer contests a visible check
+        conn.executescript(
+            "BEGIN;CREATE TABLE IF NOT EXISTS disputes ("
+            "id TEXT PRIMARY KEY, task_id TEXT, checkset_hash TEXT, check_id TEXT, requirement_id TEXT, "
+            "argument TEXT, status TEXT NOT NULL DEFAULT 'open', outcome TEXT, resolver TEXT, "
+            "new_checkset_hash TEXT, opened_at REAL, resolved_at REAL);"
+            "PRAGMA user_version=3;COMMIT;")

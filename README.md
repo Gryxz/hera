@@ -4,7 +4,7 @@ A coordinator that gets coding tasks done by AI models and only calls them done 
 
 Private project for a group of four. Each member runs their own copy.
 
-> **Status: milestone 0.1, step 7a of 10 is done (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox, and the first half of the acceptance oracle: checks, frozen check store, pytest adapter and check validation); S5 (local model host) is deferred until someone has a Mac, and S4 and S7a are pending review.** Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can open a network connection and the provider adapters are exercised against loopback mock servers only. Next up is step S7b. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+> **Status: milestone 0.1, step 7b of 10 is built (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox, and the acceptance oracle: checks, frozen check store, pytest adapter, check validation, diff audit, verification receipts, verdicts, attribution, redacted feedback and disputes); S5 (local model host) is deferred until someone has a Mac, and S4 and S7b are pending review.** One tamper route is still open: candidate code that monkeypatches pytest inside the checks' process gets a false `PASS` (documented, tested, see docs/ORACLE.md). Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can open a network connection and the provider adapters are exercised against loopback mock servers only. Next up is step S7c. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ---
 
@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 461 tests; 7 skip where no sandbox mechanism is available
+pytest -q                       # 554 tests; 7 skip where no sandbox mechanism is available
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -86,14 +86,17 @@ Around that loop:
 | `src/hera/oracle/checkstore.py` | Frozen, hashed, read-only check store (visible and hidden), integrity check, supersede; see `docs/ORACLE.md` | done |
 | `src/hera/oracle/adapters/` | pytest adapter: protected-path restoration, sentinels, JUnit parsing, redacted feedback | done (Python only; same interpreter as HERA) |
 | `src/hera/oracle/validation.py` | Validate a draft check set on the base commit (fail-before, stability) | done (no stub adversaries or mutation testing yet) |
+| `src/hera/oracle/audit.py` | Diff audit: protected paths, skip markers, declared scope, debris, dependency manifests, twin search; folds in what `prepare` undid | done |
+| `src/hera/oracle/verify.py` | Verify a commit: audit, check run, regressions against the base-commit run of the project's own tests, receipt, verdict, attribution, persistence, redacted feedback | done (in-process tamper gap open) |
+| `src/hera/oracle/disputes.py` | Disputes about visible checks; independent resolution; schema version 3 | done |
 | `src/hera/types.py` | Shared data types and enums | done |
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
-| `src/hera/cli.py` | `hera init`, `hera status` | done |
+| `src/hera/cli.py` | `hera init`, `hera status`, `hera verify` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks and an invented toy project (`toyrepo.py`) | 461 (7 need a sandbox mechanism) |
+| `tests/` | One test file per module, plus portability checks and an invented toy project (`toyrepo.py`) | 554 (7 need a sandbox mechanism) |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
-Not built yet: local model host, check authoring by models, receipts and verdict wiring (S7b), agent loop, recovery, attribution.
+Not built yet: local model host, check authoring by models, requirements approval screen, out-of-process checks (S7c), agent loop, recovery, attribution learning ledger.
 
 ## Rules — please do not break these
 
@@ -117,15 +120,17 @@ Not built yet: local model host, check authoring by models, receipts and verdict
 - Commit messages: what changed and why, in plain sentences.
 - One build-plan step per pull request where practical; update the step's status in `docs/BUILD_PLAN.md` in the same pull request.
 
-## Next step: S7b — verdicts
+## Next step: S7c — out-of-process (contract) checks
 
-Built in S7a (see [docs/ORACLE.md](docs/ORACLE.md)): check objects, frozen check store, pytest adapter, validation on the base commit. Build now:
-- Verify: fresh checkout, `prepare`, `run`, then a `Receipt` from the `RunReport` and `PrepareReport`; verdict through `hera.oracle.verdict`.
-- Diff audit from the `PrepareReport` plus declared scope, debris and twin search.
-- Redacted feedback to the implementer; disputes (`checkstore.supersede`).
-- Requirements summary and approval screen (terminal); two blind check authors.
+Pulled forward from milestone 0.2 to close the one known tamper route: native pytest checks import candidate code into the runner's process (see docs/ORACLE.md, "Residual risk"). Built in S7a and S7b: check objects, frozen check store, pytest adapter, validation, diff audit, verify → receipt → verdict → attribution, redacted feedback, disputes, `hera verify`. Build now:
+- A language-neutral declarative check file: run this command, send this stdin, read this file, then expect this exit code, stdout or JSON shape.
+- An oracle-owned runner process that executes those files and never imports candidate code; the candidate runs as a separate sandboxed subprocess.
+- Hidden contract checks are never copied into the candidate's checkout.
+- Freeze, hash, validate on the base commit and feed the same receipt and verdict path as the pytest checks.
 
-Done when, on the toy repository, a correct patch gives `PASS`, a test-editing patch `TAMPER`, a hard-coded patch `OVERFIT` and a regression `REGRESSION`.
+Done when `test_KNOWN_GAP_in_process_monkeypatch_yields_false_pass` can be flipped: the monkeypatching candidate no longer gets `PASS`, and the toy repository's verdicts are unchanged.
+
+Still open from S7b: requirements summary and approval screen (terminal); two blind check authors.
 
 S5 (local model host) is deferred: its Mac part needs a Mac to run and test.
 
