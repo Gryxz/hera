@@ -352,6 +352,11 @@ The owner reads one screen and approves it before checks are frozen: outcomes, o
 constraints and assumptions, not individual tests. Checks are derived only from the approved version and
 its hash is stored with the check set. Code: `summary.py`; schema version 6.
 
+Block limits are the design's (outcomes 5, behaviour examples 6, constraints 5, assumptions 5, not
+verifiable 5, out of scope 3, questions 3). The design set no limit on requirements; **at most 6** is a
+first value chosen so the screen stays within 40 lines. A task that needs more requirements than that
+is probably several tasks; if real tasks keep hitting the limit, the layout (not the limit) should change.
+
 ### Format (`SUMMARY.toml`)
 
 ```toml
