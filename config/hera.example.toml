@@ -44,3 +44,31 @@ local = "mlx-community/Qwen3.5-9B-OptiQ-4bit"
 host_memory_limit_gb = 9.0
 max_context_tokens = 12000
 enable_thinking = false        # the model thinks by default; off for short local contexts
+
+# ---- model providers ---------------------------------------------------------------------------
+# One section per provider. The API key is NEVER written here: `key_env` is the NAME of an
+# environment variable that holds it. A provider whose variable is unset (or whose model is empty)
+# is left out; `hera providers list` shows why. Test one with `hera providers check <name>`.
+[providers.default]
+kind = "anthropic"            # anthropic | openai_compat | grok
+url = "https://api.anthropic.com/v1/messages"
+model = ""                    # exact dated model id
+key_env = "ANTHROPIC_API_KEY" # name of the environment variable; the key itself is never in a file
+tier = "default"              # must have a price under [prices.tiers]
+extra_headers = { "anthropic-version" = "2023-06-01" }
+
+# An OpenAI-compatible endpoint on this machine (llama-server and similar): loopback only, tier
+# "local" (free, exempt from spending caps), no key.
+# [providers.local-llm]
+# kind = "openai_compat"
+# url = "http://127.0.0.1:8080/v1/chat/completions"
+# model = "your-local-model"
+# local = true
+# tier = "local"
+
+# xAI Grok (OpenAI-compatible; url defaults to https://api.x.ai/v1/chat/completions).
+# [providers.grok]
+# kind = "grok"
+# model = ""
+# key_env = "XAI_API_KEY"
+# tier = "cheap"

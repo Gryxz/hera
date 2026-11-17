@@ -9,8 +9,8 @@ Tested against a mock server only; it has not been exercised against the real se
 from __future__ import annotations
 import json
 from typing import Sequence
-from ..types import ModelReply, Usage
-from .base import BaseProvider, Message, ProviderError
+from ..types import ModelReply, ToolCall, Usage
+from .base import BaseProvider, Message, ProviderError, args_text, make_tool_call
 
 _ALLOWED = ("temperature", "top_p", "stop_sequences", "tool_choice", "thinking")
 
@@ -20,14 +20,51 @@ class AnthropicProvider(BaseProvider):
                options: dict) -> bytes:
         system = [m.data.decode("utf-8") for m in messages if m.role == "system"]
         body: dict = {"model": self.model_id, "max_tokens": max_tokens,
-                      "messages": [{"role": m.role, "content": m.data.decode("utf-8")}
-                                   for m in messages if m.role != "system"]}
+                      "messages": self._wire_messages([m for m in messages if m.role != "system"])}
         if system:
             body["system"] = "\n\n".join(system)
         if tools:
             body["tools"] = list(tools)
         body.update({k: v for k, v in options.items() if k in _ALLOWED and v is not None})
         return json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+    @staticmethod
+    def _wire_messages(messages: Sequence[Message]) -> list[dict]:
+        out: list[dict] = []
+        for m in messages:
+            text = m.data.decode("utf-8")
+            if m.role == "tool":
+                block = {"type": "tool_result", "tool_use_id": m.tool_call_id, "content": text}
+                last = out[-1] if out else None
+                if last and last["role"] == "user" and isinstance(last["content"], list) \
+                        and last["content"] and last["content"][-1].get("type") == "tool_result":
+                    last["content"].append(block)       # results of one assistant turn share a message
+                else:
+                    out.append({"role": "user", "content": [block]})
+            elif m.role == "assistant" and m.tool_calls:
+                blocks = ([{"type": "text", "text": text}] if text else [])
+                blocks += [{"type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments}
+                           for c in m.tool_calls]
+                out.append({"role": "assistant", "content": blocks})
+            else:
+                out.append({"role": m.role, "content": text})
+        return out
+
+    def render_tools(self, specs: Sequence[dict]) -> list[dict]:
+        return [{"name": t["name"], "description": t.get("description", ""),
+                 "input_schema": t["parameters"]} for t in specs]
+
+    def normalise_tool_calls(self, reply: ModelReply) -> tuple[ToolCall, ...]:
+        out: list[ToolCall] = []
+        seen: set[str] = set()
+        for i, raw in enumerate(reply.tool_calls):
+            raw = raw if isinstance(raw, dict) else {}
+            out.append(make_tool_call(i, raw.get("id"), raw.get("name"), raw.get("input"), seen))
+        return tuple(out)
+
+    def _args_in_body(self, call: ToolCall, body_text: str) -> bool:
+        # the arguments travel as a nested JSON object, so they appear unescaped
+        return any(json.dumps(call.arguments, ensure_ascii=a) in body_text for a in (False, True))
 
     def _parse(self, body: bytes) -> ModelReply:
         try:

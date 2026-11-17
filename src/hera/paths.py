@@ -13,6 +13,10 @@ def db_path() -> Path:
     return hera_home() / "state.sqlite"
 
 
+def config_path() -> Path:
+    return hera_home() / "hera.toml"
+
+
 def policy_dir() -> Path:
     return hera_home() / "policy"
 

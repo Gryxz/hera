@@ -263,7 +263,7 @@ def test_budget_blocks_before_sending(conn, mock):
 
 
 def test_estimate_usd():
-    assert estimate_usd(TierPrice(2.0, 10.0), 400, 1000) == pytest.approx((100 * 2.0 + 1000 * 10.0) / 1e6)
+    assert estimate_usd(TierPrice(2.0, 10.0), 300, 1000) == pytest.approx((100 * 2.0 + 1000 * 10.0) / 1e6)
 
 
 # -- errors ------------------------------------------------------------------------------------
