@@ -458,8 +458,12 @@ def test_the_restart_budget_only_counts_restarts_inside_the_window(rig, conn):
     ask(provider)                                               # restart at t=1000
     r.spawner.procs[1].wait(timeout=10)
     clock.t += 101                                              # the first restart left the window
-    ask(provider)
-    assert r.host.status()["state"] == "ready" and len(r.spawner.procs) == 3
+    assert ask(provider).text == "fake reply"                   # a second restart is allowed again
+    # this child also exits right after its one reply, so whether the lease's exit already saw it go
+    # is a race: the state may be "ready" or "evicted", but never "failed"
+    st = r.host.status()
+    assert st["state"] in ("ready", "evicted") and len(r.spawner.procs) == 3
+    assert "failed" not in r.kinds() and st["restarts_in_window"] == 1
 
 
 def test_the_failed_state_survives_a_new_process_until_reset(rig):
