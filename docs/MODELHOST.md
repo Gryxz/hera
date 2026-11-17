@@ -45,8 +45,8 @@ States: `evicted`, `starting`, `ready`, `failed`, `no_room`.
   command is unchanged. A command with no matching provider is reported in `built.absent` (key
   `[local_model].command`) and by `hera providers list`.
 - A provider with a host takes a lease around each `complete()`, refuses (`ProviderError`, nothing sent,
-  nothing recorded) a prompt whose estimated tokens (request bytes / 3, which over-counts) exceed the
-  lease's context cap, always sends `chat_template_kwargs: {"enable_thinking": <setting>}` unless the
+  nothing recorded) a request whose estimated prompt tokens (request bytes / 3, which over-counts)
+  plus `max_tokens` exceed the lease's context cap (the reply occupies the context too), always sends `chat_template_kwargs: {"enable_thinking": <setting>}` unless the
   caller passed its own, and turns `HostUnavailable`, `HostStartError` and `HostBusy` into `ProviderError`,
   so the orchestrator's provider-error handling applies and the coordinator never crashes because the host did.
 - `sandbox.run` calls `before_each_job` hooks. `run_task` and `continue_task` install one that evicts every
@@ -138,6 +138,6 @@ loads the model by itself when a local provider needs it.
 - If the coordinator is killed hard (SIGKILL), the child is orphaned and keeps the port. The next start is
   refused as `port_in_use` and the child has to be stopped by hand. A normal exit, an exception or Ctrl-C
   evicts it (a `finally` block and an `atexit` hook).
-- The context cap counts the prompt only (estimated as request bytes / 3), not the tokens still to be
-  generated.
+- The prompt is estimated (request bytes / 3), not tokenised; a prompt of unusually dense text could
+  still exceed the cap. The estimate plus `max_tokens` is what is compared with the cap.
 - The health check proves the process answers `GET /v1/models`, not that it can generate.

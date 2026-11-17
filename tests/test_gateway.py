@@ -165,7 +165,7 @@ def test_transport_error_does_not_raise(conn):
         server_address = ("127.0.0.1", port)
     e = Env(conn, Srv())
     r = e.gw.send("prov", [e.label("a", "pub", b"x")], purpose="p")
-    assert not r.sent and r.reason.startswith("transport error")
+    assert not r.sent and r.reason.startswith("transport error") and r.transport_error
     assert e.rows()[-1]["decision"] == "sent"        # bytes may have left; record stays
 
 

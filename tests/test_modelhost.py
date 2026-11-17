@@ -597,6 +597,16 @@ def test_a_prompt_over_the_lease_cap_is_refused_with_nothing_sent_or_recorded(ri
     assert ask(provider, "y" * 9_000).text == "fake reply"      # about 3000 estimated tokens: fits
 
 
+def test_the_reply_counts_against_the_cap_too(rig, conn):
+    r = rig(memory=lambda: 8_800_000_000)                       # 3703 tokens
+    provider = r.provider(conn)
+    assert ask(provider, "y" * 9_000).text == "fake reply"      # ~3000 prompt + 16 reply: fits
+    sent = len(requests_seen(r.record))
+    with pytest.raises(ProviderError, match="prompt plus max_tokens"):
+        provider.complete([Message("user", "u1", ("y" * 9_000).encode())], max_tokens=1000)
+    assert len(requests_seen(r.record)) == sent                 # ~3000 + 1000 > 3703: nothing sent
+
+
 def test_a_prompt_over_the_configured_maximum_is_refused_without_loading_the_model(rig, conn):
     r = rig(max_context_tokens=2048, min_context_tokens=1024)
     provider = r.provider(conn)

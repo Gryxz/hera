@@ -44,10 +44,14 @@ supported. Do not use thread, session or conversation-id features of any endpoin
 ## Call flow and budget
 
 `complete` builds the body, verifies it contains exactly the inspected segment text, estimates
-the cost (input at 4 bytes per token plus `max_tokens` of output), asks the ledger to check caps
-(a capped call raises `BudgetExceeded` and nothing is sent), sends through the gateway, then records
-the real usage. A refusal raises `ProviderBlocked`; an HTTP error or unparseable reply raises
-`ProviderError` (an unparseable reply also leaves a zero-usage `:unparsed` ledger row). If a reply
+the cost (input at 3 bytes per token, which over-counts on purpose, plus `max_tokens` of output), asks
+the ledger to check caps (a capped call raises `BudgetExceeded` and nothing is sent), sends through
+the gateway, then records the real usage. A privacy refusal raises `ProviderBlocked`. An HTTP error,
+an unparseable reply, or a transport failure (connection refused, timeout, reset: the gateway allowed
+the send but no response came back) raises `ProviderError`, so the recovery ladder treats it as a
+provider failure and never as a privacy block. After a transport failure the request may still have
+reached the provider and been billed; nothing is recorded for it (known gap). An unparseable reply
+leaves a zero-usage `:unparsed` ledger row. If a reply
 carries no usage, `reply.usage_reported` is `False` and zero is recorded, so check that flag.
 
 ## Rules enforced in code

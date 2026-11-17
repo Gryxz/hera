@@ -34,7 +34,7 @@ class OpenAICompatProvider(BaseProvider):
                  purpose: str = "implement", tools: Sequence = (), **options) -> ModelReply:
         """Without a host this is the shared flow. With one: take the lease (one local generation at
         a time), refuse a prompt that would not fit the context cap (nothing is sent, nothing is
-        recorded), turn thinking off unless the caller chose, and report any host failure as
+        recorded; the prompt estimate plus max_tokens is what must fit), turn thinking off unless the caller chose, and report any host failure as
         ProviderError so the orchestrator's normal provider-error handling applies."""
         if self.host is None:
             return super().complete(messages, max_tokens=max_tokens, task_id=task_id, purpose=purpose,
@@ -43,13 +43,14 @@ class OpenAICompatProvider(BaseProvider):
             options["chat_template_kwargs"] = {"enable_thinking": self.host.settings.enable_thinking}
         messages = list(messages)
         self._validate(messages)
-        estimate = estimate_prompt_tokens(self._build(messages, max_tokens, tools, options))
+        # the context holds the prompt AND the reply, so both count against the cap
+        estimate = estimate_prompt_tokens(self._build(messages, max_tokens, tools, options)) + max_tokens
         if estimate > self.host.settings.max_context_tokens:      # cannot fit at any memory level
-            raise ProviderError("the prompt is larger than the local model's context limit")
+            raise ProviderError("the prompt plus max_tokens is larger than the local model's context limit")
         try:
             with self.host.lease() as lease:
                 if estimate > lease.context_cap:
-                    raise ProviderError("the prompt does not fit the local model's context cap "
+                    raise ProviderError("the prompt plus max_tokens does not fit the local model's context cap "
                                         f"({lease.context_cap} tokens)")
                 return super().complete(messages, max_tokens=max_tokens, task_id=task_id,
                                         purpose=purpose, tools=tools, **options)

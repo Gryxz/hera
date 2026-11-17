@@ -183,6 +183,10 @@ class BaseProvider:
                 segments.append(Segment(calls_artefact_id(m), render_calls_artefact(m.tool_calls)))
         result = self.gateway.send(self.destination_name, segments,
                                    purpose=purpose, task_id=task_id, envelope=lambda segs: body)
+        if not result.sent and result.transport_error:
+            # allowed by the gateway but unanswered: a provider failure (it may have been received,
+            # and possibly billed, by the provider), never a privacy block
+            raise ProviderError(f"the provider could not be reached ({result.reason})")
         if not result.sent:
             raise ProviderBlocked(result.reason)
         if result.status is None or not 200 <= result.status < 300:
