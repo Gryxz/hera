@@ -42,6 +42,8 @@ DISPUTE_REJECTED = "dispute_rejected"
 FEEDBACK_VERDICT = "verdict"            # the oracle's rendered feedback
 FEEDBACK_OVERFIT = "overfit"            # requirement-level feedback only
 FEEDBACK_DISPUTE_REJECTED = "dispute_rejected"
+FEEDBACK_DISPUTE_UPHELD = "dispute_upheld"      # a continued task: the dispute was reviewed, the check stands
+FEEDBACK_CONTINUED = "continued"                # a continued task: the same candidate goes on after a cap stop
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,13 @@ def decide(st: LadderState, out: Outcome, caps: Caps, limits: RecoveryLimits = R
                     replace(st, retries_used=st.retries_used + 1, dispute_rejections=st.dispute_rejections + 1))
         return _advance(st, "context", caps, limits, rules)        # treated as no_progress
     raise ValueError(f"unknown outcome {k!r}")
+
+
+def next_after_provider_error(st: LadderState, caps: Caps, limits: RecoveryLimits = RecoveryLimits(),
+                              rules: Rules = Rules()) -> tuple[Action, LadderState]:
+    """Continuing a task that stopped as PROVIDER_ERROR: the rung the ladder would have moved to. A
+    ``stop`` result means no rung is left (nothing to continue)."""
+    return _advance(st, "provider", caps, limits, rules)
 
 
 def after_diagnosis(st: LadderState, act: Action, result: str) -> tuple[Action, LadderState]:
