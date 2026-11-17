@@ -288,3 +288,20 @@ def test_submodule_entry_not_initialised(repo):
 
 def test_workspace_error_type():
     assert issubclass(WorkspaceError, RuntimeError)
+
+
+def test_open_candidate_list_files_and_diff_text(toy):
+    wt = toy.repo.candidate("reopen")
+    (wt.path / "calc.py").write_text("def add(a, b):\n    return a + b + 0\n")
+    c1 = wt.commit_all("edit")
+    again = toy.repo.open_candidate("reopen")                         # what a restarted process does
+    assert again.path == wt.path and again.branch == wt.branch and again.head() == c1
+    assert toy.repo.candidate("reopen").head() == c1                    # `candidate` re-opens instead of failing
+    with pytest.raises(FileNotFoundError):
+        toy.repo.open_candidate("never-created")
+    with pytest.raises(ValueError):
+        toy.repo.open_candidate("../escape")
+    assert toy.repo.list_files(toy.base) == ["calc.py", "conftest.py", "tests/test_calc.py"]
+    diff = toy.repo.diff_text(toy.base, c1)
+    assert "+    return a + b + 0" in diff and "-    return a + b\n" in diff + "\n"
+    assert toy.repo.diff_text(toy.base, c1, max_bytes=20).endswith("[diff truncated]")

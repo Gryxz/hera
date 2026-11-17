@@ -82,7 +82,10 @@ def build_providers(config: Config, gateway: Gateway, ledger: Ledger,
     Providers that cannot be built are listed in ``result.absent`` with a reason."""
     out = ProviderSet()
     for name, spec in config.providers.items():
-        why = _problem(spec, env, config.prices)
+        # "local" is the gateway's reserved name for "never leaves this process"; a provider called
+        # that would be refused on every call, which looks like a privacy block. Say so up front.
+        why = ("the name 'local' is reserved; call the provider something else, e.g. 'local-llm'"
+               if name == "local" else _problem(spec, env, config.prices))
         if not why:
             try:
                 dest = Destination(name, effective_url(spec), _headers(spec, env), local=spec.local)

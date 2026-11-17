@@ -70,7 +70,7 @@ def test_v3_store_migrates_to_v4_and_gets_attempts_and_turns(tmp_path):
     assert not raw.execute("SELECT name FROM sqlite_master WHERE name IN ('attempts','turns')").fetchall()
     raw.close()
     c = db.connect(p)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 4 == db.SCHEMA_VERSION
+    assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION      # connect() migrates all the way up
     assert [r[1] for r in c.execute("PRAGMA table_info(attempts)")] == [
         "id", "task_id", "seq", "tier", "provider", "model_id", "candidate", "status", "base_commit",
         "final_commit", "summary", "declared_scope_json", "twin_pattern", "started_at", "ended_at"]
@@ -84,3 +84,30 @@ def test_v3_store_migrates_to_v4_and_gets_attempts_and_turns(tmp_path):
         c.execute("INSERT INTO attempts(id,task_id,seq,status) VALUES('b','t',1,'running')")
     c.close()
     db.connect(p).close()                                 # reopening does nothing further
+
+
+def test_v4_store_migrates_to_v5_and_gets_task_events(tmp_path):
+    import sqlite3
+    import pytest
+    p = tmp_path / "v4.sqlite"
+    c = db.connect(p)
+    c.execute("INSERT INTO requirements(id,task_id,text,created_at) VALUES('t:R-1','t','x',1)")
+    c.execute("INSERT INTO attempts(id,task_id,seq,status) VALUES('t-a1','t',1,'submitted')")
+    c.executescript("DROP TABLE task_events; PRAGMA user_version=4;")      # step back to a genuine v4 store
+    c.close()
+    raw = sqlite3.connect(p)
+    assert not raw.execute("SELECT name FROM sqlite_master WHERE name='task_events'").fetchall()
+    raw.close()
+    c = db.connect(p)
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 5 == db.SCHEMA_VERSION
+    assert [r[1] for r in c.execute("PRAGMA table_info(task_events)")] == [
+        "task_id", "seq", "at", "kind", "detail_json"]
+    assert c.execute("SELECT text FROM requirements WHERE id='t:R-1'").fetchone()[0] == "x"     # data kept
+    assert c.execute("SELECT status FROM attempts WHERE id='t-a1'").fetchone()[0] == "submitted"
+    c.execute("INSERT INTO task_events(task_id,seq,at,kind,detail_json) VALUES('t',1,1.0,'routing','{}')")
+    with pytest.raises(sqlite3.IntegrityError):                  # PRIMARY KEY(task_id, seq)
+        c.execute("INSERT INTO task_events(task_id,seq,at,kind,detail_json) VALUES('t',1,2.0,'stopped','{}')")
+    with pytest.raises(sqlite3.IntegrityError):                  # kind is required
+        c.execute("INSERT INTO task_events(task_id,seq,at,kind,detail_json) VALUES('t',2,2.0,NULL,'{}')")
+    c.close()
+    db.connect(p).close()                                         # reopening does nothing further

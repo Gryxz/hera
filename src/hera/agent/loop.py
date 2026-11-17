@@ -235,6 +235,52 @@ def run_attempt(conn: sqlite3.Connection, *, task_id: str, attempt_seq: int, pro
     return _finish(conn, attempt_id, "out_of_turns", checkpoint, summary="turn limit")
 
 
+NOT_RUN_TEXT = "not run: the attempt ended before this call"
+
+
+def replay_messages(conn: sqlite3.Connection, attempt_id: str, toolbox: ToolBox, start_messages) -> list[Message]:
+    """The conversation of a FINISHED attempt as the loop held it: ``start_messages`` then, per stored
+    turn, the model's message and its tool results (a nudge after a reply without calls). Calls that
+    never ran because ``submit``/``dispute`` ended the reply get a fixed "not run" result, so every
+    tool call in the history has a result, as both wire formats require when a conversation goes on.
+    Used by the orchestrator to continue the same conversation in a retry. Labels are (re)written
+    exactly as the loop writes them."""
+    history: list[Message] = list(start_messages)
+    rows = conn.execute("SELECT * FROM turns WHERE attempt_id=? ORDER BY seq", (attempt_id,)).fetchall()
+    for i, turn in enumerate(rows):
+        if turn["reply_json"] is None:
+            break
+        reply, calls = _reply_from_json(turn["reply_json"])
+        text = reply.text if (reply.text or calls) else EMPTY_REPLY_TEXT
+        assistant = Message("assistant", f"{attempt_id}:{turn['seq']}:assistant", text.encode("utf-8"),
+                            tool_calls=calls)
+        label_bytes(toolbox.label_store, toolbox.policy, artefact_id=assistant.artefact_id,
+                    repo_id=toolbox.repo_id, data=assistant.data)
+        if calls:
+            label_bytes(toolbox.label_store, toolbox.policy, artefact_id=calls_artefact_id(assistant),
+                        repo_id=toolbox.repo_id, data=render_calls_artefact(calls))
+        history.append(assistant)
+        if not calls:
+            if i + 1 < len(rows):
+                nudge = NUDGE_TEXT.encode("utf-8")
+                label_builtin(toolbox.label_store, artefact_id="hera:nudge:v1", data=nudge)
+                history.append(Message("user", "hera:nudge:v1", nudge))
+            continue
+        if turn["tool_results_json"] is None:
+            raise ValueError("the attempt has a turn without tool results; it is not finished")
+        outputs = _results_from_json(toolbox, turn["tool_results_json"])
+        for j, call in enumerate(calls):
+            if j < len(outputs):
+                out = outputs[j]
+                history.append(Message("tool", out.artefact_id, out.data, tool_call_id=call.id))
+            else:
+                aid = f"{attempt_id}:{turn['seq']}:{j}:result"
+                data = NOT_RUN_TEXT.encode("utf-8")
+                label_builtin(toolbox.label_store, artefact_id=aid, data=data)
+                history.append(Message("tool", aid, data, tool_call_id=call.id))
+    return history
+
+
 def _complete(provider: BaseProvider, history, tools, max_tokens: int, task_id: str,
               purpose: str) -> ModelReply:
     failures = 0

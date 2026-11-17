@@ -39,7 +39,8 @@ def _requirement_lines(requirements) -> list[str]:
 
 def initial_messages(*, task_objective: str, requirements: Sequence,
                      visible_check_files: Mapping[str, bytes], repo_file_list: Sequence[str],
-                     label_store: LabelStore, policy: Policy, repo_id: str) -> list[Message]:
+                     label_store: LabelStore, policy: Policy, repo_id: str,
+                     extra_sections: Sequence[tuple[str, str]] = ()) -> list[Message]:
     """System message (HERA's fixed text, built-in label) and one user message with the objective,
     requirements, repository file list and visible check files (labelled by the repository's class)."""
     system = SYSTEM_TEXT.encode("utf-8")
@@ -56,6 +57,8 @@ def initial_messages(*, task_objective: str, requirements: Sequence,
     for name in sorted(visible_check_files):
         text = visible_check_files[name].decode("utf-8", "replace")
         parts += [f"### {name}", text.rstrip("\n"), ""]
+    for heading, text in extra_sections:
+        parts += ["", f"## {heading}", text.strip()]
     user = "\n".join(parts).encode("utf-8")
     uid = "hera:user:initial:" + hashlib.sha256(user).hexdigest()[:16]
     label_bytes(label_store, policy, artefact_id=uid, repo_id=repo_id, data=user)

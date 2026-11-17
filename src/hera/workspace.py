@@ -292,6 +292,29 @@ class TaskRepo:
         admin = _git(["rev-parse", "--absolute-git-dir"], cwd=path).stdout.decode().strip()
         return Worktree(self, name, path, branch, Path(admin))
 
+    def open_candidate(self, name: str) -> Worktree:
+        """Re-open a candidate worktree created earlier (after a restart). Raises FileNotFoundError
+        if it does not exist or its administrative directory does not point back at it."""
+        _check_id(name, "candidate name")
+        path = self.root / "candidates" / name
+        admin = self.bare / "worktrees" / name
+        link = admin / "gitdir"
+        try:
+            ok = path.is_dir() and link.is_file() and \
+                os.path.realpath(link.read_text(encoding="utf-8").strip()) == os.path.realpath(path / ".git")
+        except OSError:
+            ok = False
+        if not ok:
+            raise FileNotFoundError(f"no such candidate: {name}")
+        return Worktree(self, name, path, f"cand/{name}", admin)
+
+    def candidate(self, name: str) -> Worktree:
+        """The candidate worktree ``name``: re-opened if it exists, else created."""
+        try:
+            return self.open_candidate(name)
+        except FileNotFoundError:
+            return self.new_candidate(name)
+
     # ---- verification --------------------------------------------------------------
     def verification_checkout(self, commit: str) -> Path:
         """Create a new directory holding exactly the tree of ``commit`` and nothing else.
@@ -439,7 +462,21 @@ class TaskRepo:
             pos = nl + 1 + size + 1
         return result
 
+    def list_files(self, commit: str) -> list[str]:
+        """Sorted paths of every file in ``commit``'s tree (plumbing only)."""
+        commit = self._require_commit(commit)
+        out = self._g(["ls-tree", "-r", "-z", "--name-only", "--full-tree", commit]).stdout
+        return sorted(os.fsdecode(x) for x in out.split(b"\0") if x)
+
     # ---- diffs ---------------------------------------------------------------------
+    def diff_text(self, base: str, commit: str, max_bytes: int = 32 * 1024) -> str:
+        """Unified diff of ``base`` -> ``commit`` as text, cut at ``max_bytes``."""
+        out = self._diff_tree(base, commit, "-p", "--no-color")
+        text = out.replace(b"\0", b"").decode("utf-8", "replace")
+        if len(out) > max_bytes:
+            text = out[:max_bytes].replace(b"\0", b"").decode("utf-8", "ignore") + "\n[diff truncated]"
+        return text
+
     def _diff_tree(self, base: str, commit: str, *flags: str) -> bytes:
         base, commit = self._require_commit(base), self._require_commit(commit)
         return self._g(["diff-tree", "-r", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
