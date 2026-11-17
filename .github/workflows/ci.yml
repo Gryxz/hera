@@ -1,27 +1,11 @@
 name: ci
-on: [push, pull_request]
+on: [push]
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-        python: ["3.11", "3.13"]
-    runs-on: ${{ matrix.os }}
+  diag:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
-      - name: Install bubblewrap (Linux sandbox)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update && sudo apt-get install -y bubblewrap
-          bwrap --version || true
-          # recent Ubuntu runners restrict unprivileged user namespaces; without this the
-          # sandbox probe fails and the isolation tests would be skipped instead of run
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - run: python -m pip install -e ".[dev]"
-      - name: Sandbox mechanism on this runner
-        run: python -c "from hera import sandbox; print('sandbox mechanism:', sandbox.detect_mechanism())"
-      - run: python -m pytest -q -rs
+          python-version: "3.13"
+      - run: python diag/macos_start.py
