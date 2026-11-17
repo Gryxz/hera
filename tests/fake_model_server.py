@@ -92,6 +92,16 @@ def make_handler(args, mode, limit):
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    """http.server's server_bind calls socket.getfqdn(host) between bind() and listen(); on the
+    GitHub macOS runners a reverse lookup of 127.0.0.1 takes about 35 s (measured), so the port is
+    bound but refuses connections for that long. The fake server does not need a server name."""
+    def server_bind(self):
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, required=True)
@@ -118,7 +128,7 @@ def main():
     if mode == "spawn_child":
         child = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(600)"])
         record(args.record, {"grandchild": child.pid, "pid": os.getpid()})
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(args, mode, limit))
+    srv = _Server(("127.0.0.1", args.port), make_handler(args, mode, limit))
     srv.daemon_threads = True
     srv.serve_forever()
     return 0

@@ -141,3 +141,8 @@ loads the model by itself when a local provider needs it.
 - The prompt is estimated (request bytes / 3), not tokenised; a prompt of unusually dense text could
   still exceed the cap. The estimate plus `max_tokens` is what is compared with the cap.
 - The health check proves the process answers `GET /v1/models`, not that it can generate.
+- A model server built on Python's `http.server` does a reverse lookup of 127.0.0.1 (`socket.getfqdn`)
+  after binding and before listening. On GitHub's macOS runners that lookup was measured at about 35 s,
+  so the port refuses connections for that long (the fake server skips the lookup for this reason). On a
+  normal Mac it is usually instant; if `hera host start` times out, check that lookup and raise
+  `startup_timeout_s`.
