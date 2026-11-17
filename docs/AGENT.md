@@ -4,7 +4,8 @@ Code: `src/hera/agent/{tools,prompts,loop,policy,orchestrator}.py`, `src/hera/pr
 `src/hera/report.py`, `src/hera/cli.py`. Tests: `tests/test_agent_tools.py`, `tests/test_agent_loop.py`,
 `tests/test_provider_toolcalls.py`, `tests/test_registry.py`, `tests/test_policy_ladder.py`,
 `tests/test_orchestrator.py`, `tests/test_cli_run.py`, `tests/test_continue.py`,
-`tests/test_cli_continue.py`, `tests/test_dispute_cli.py`, `tests/test_report.py` (helper
+`tests/test_cli_continue.py`, `tests/test_dispute_cli.py`, `tests/test_report.py`,
+`tests/test_summary_cli.py` (helper
 `tests/scripted_llm.py`).
 
 **Nothing here has talked to a real model.** Every test runs against a 127.0.0.1 server that plays a
@@ -142,6 +143,21 @@ diagnosis: 1, after other fresh default candidates: 1, for the escalated candida
 rule) are the fields of `policy.Rules`. The per-task dollar cap of the ledger bounds everything.
 `decide(state, outcome, caps, limits, rules)` is pure; `tests/test_policy_ladder.py` tests it alone.
 
+## The requirements summary before `hera run`
+
+`hera run` refuses to start a task whose check set was frozen without an approved requirements summary
+(see "Requirements summary (S7d)" in [ORACLE.md](ORACLE.md)): no recorded summary, or a summary whose latest
+decision is not an approval, exits 2 with the commands that fix it, before any provider is built and before
+anything is logged. The only escape is `--without-approved-summary`, which proceeds and records
+`"summary": "not approved (override)"` in the routing event (the hash of the approved summary is recorded
+there when there is one). The same command refuses a check set that differs from the one the task's first
+routing event recorded (exit 2, nothing logged): after an amended check use `hera task continue`, otherwise
+start a new task id. `hera task continue` does not ask for a summary again.
+
+The requirement lives in the command line, where a person works. `run_task` and `continue_task` do not look
+at summaries, so a caller that uses the library directly must enforce approval itself (`TaskSpec.summary` is
+only the text the CLI wants in the routing event; `None` records nothing).
+
 ## Privacy routing (before any call)
 
 `compute_routing` takes the repository's class from the policy, builds its label and calls
@@ -150,7 +166,7 @@ rule) are the fields of `policy.Rules`. The per-task dollar cap of the ledger bo
 only if its destination is permitted or loopback. If the default provider is not permitted and a
 `local`-tier provider exists, the implementer runs there and the diagnosis and escalation rungs that
 have no permitted destination are skipped; if neither exists the task ends `BLOCKED_PRIVACY` without
-any request. The decision is the first event of the task (`routing`; destination names only). A
+any request. The decision is the first event of the task (`routing`; destination names only, the check-set hash and the summary note). A
 personal or proprietary repository has no content hash at this point, so without a grant that names
 it routes local-only; the gateway still checks every message again.
 
@@ -287,16 +303,19 @@ as conclusions.
    runner = "pytest"               # pytest | contract (default pytest)
    ```
 
-2. `hera checks freeze --task T --repo /path/to/repo --spec spec.toml [--base COMMIT] [--allow-unsandboxed]`
-   creates the task workspace if needed, runs the checks on the base commit in a scratch store (refusing,
+2. Write a `SUMMARY.toml` (format in [ORACLE.md](ORACLE.md)) whose requirements equal the spec's, then
+   `hera summary import SUMMARY.toml`, read the screen, and `hera summary approve HASH --by human:<name>
+   --may-leave-machine yes|no`.
+3. `hera checks freeze --task T --repo /path/to/repo --spec spec.toml --summary HASH [--base COMMIT] [--allow-unsandboxed]`
+   needs that approved summary (same task, requirements exactly equal to the spec's) and creates the task workspace if needed, runs the checks on the base commit in a scratch store (refusing,
    with exit 3 and per-check health, if any check is flaky or invalid; `--skip-validation` overrides),
    freezes them and prints `check-set hash: <hash>`. The repository must be in the privacy policy with
    its class, or it counts as sensitive and no remote provider will be used.
-3. `hera providers check <name>` for each provider in hera.toml (the keys come from the environment).
-4. `hera run --task T --checkset HASH --objective "..." [--max-usd X] [--allow-unsandboxed]` prints each
+4. `hera providers check <name>` for each provider in hera.toml (the keys come from the environment).
+5. `hera run --task T --checkset HASH --objective "..." [--max-usd X] [--without-approved-summary] [--allow-unsandboxed]` prints each
    event as it happens, then the final status, verdict, dollars, and the `in_process_only` and
    unsandboxed notes of the last verification. Exit 0 for `PASSED`, 3 for any other final status, 2 for
-   a configuration error (no provider for the default tier, unknown check set, no configuration).
-5. `hera task status T` prints the events and the current status.
-6. `hera task continue T [--max-usd X]` after a stop that can continue; `hera dispute list|resolve`
+   a configuration error or refusal (no provider for the default tier, unknown check set, no approved summary, a different check set than the task's, no configuration).
+6. `hera task status T` prints the summary hash and state, the events and the current status.
+7. `hera task continue T [--max-usd X]` after a stop that can continue; `hera dispute list|resolve`
    for disputes; `hera report` for the ledger (all described above).

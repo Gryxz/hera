@@ -6,7 +6,7 @@ import pytest
 
 from hera import cli
 from scripted_llm import ScriptedLLM, step
-from toyrepo import CALC, CHECK_FILES, CORRECT_CALC, make_toy
+from toyrepo import CALC, CHECK_FILES, CORRECT_CALC, approve_toy_summary, make_toy
 
 OBJECTIVE = "Add parse_amount to calc.py."
 WRONG_CALC = CALC + "\n\ndef parse_amount(text):\n    return 0.0\n"
@@ -101,6 +101,10 @@ def world(hera_home, tmp_path, monkeypatch):
 
 
 def freeze(world, task, spec="spec.toml", *extra, capsys=None):
+    """Imports and approves a summary of the toy requirements for the task, then freezes against it
+    (unless the caller passes its own --summary)."""
+    if "--summary" not in extra:
+        extra = ("--summary", approve_toy_summary(task, world.specdir), *extra)
     return cli.main(["checks", "freeze", "--task", task, "--repo", str(world.toy.source),
                      "--spec", str(world.specdir / spec), "--allow-unsandboxed", *extra])
 
@@ -135,7 +139,7 @@ def test_freeze_reports_spec_errors(world, capsys):
     assert "inside the spec's directory" in capsys.readouterr().err
     (world.specdir / "escape.toml").write_text(SPEC.replace('file = "test_parse_amount.py"', 'file = "../x/test_a.py"'))
     assert freeze(world, "ck4", "escape.toml") == 2
-    assert cli.main(["checks", "freeze", "--task", "ck5", "--repo", str(world.toy.source),
+    assert cli.main(["checks", "freeze", "--task", "ck5", "--repo", str(world.toy.source), "--summary", "0" * 64,
                      "--spec", str(world.specdir / "nope.toml")]) == 2
 
 
