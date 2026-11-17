@@ -50,6 +50,20 @@ local = "mlx-community/Qwen3.5-9B-OptiQ-4bit"
 host_memory_limit_gb = 9.0
 max_context_tokens = 12000
 enable_thinking = false        # the model thinks by default; off for short local contexts
+# Supervised local model host (docs/MODELHOST.md). Without `command` nothing is started by HERA.
+# command = ["/path/to/your/model-server", "--port", "{port}", "--context", "{context}"]
+# port = 8091                  # a provider of tier "local" at http://127.0.0.1:8091/... uses the host
+# fixed_overhead_gb = 8.0      # peak memory = overhead + kv_kb_per_token x context tokens
+# kv_kb_per_token = 81
+# min_context_tokens = 2048
+# reserve_gb = 0.5
+# idle_evict_seconds = 60
+# evict_before_sandbox = true
+# startup_timeout_s = 60
+# health_timeout_s = 2
+# health_failures_to_restart = 3
+# max_restarts = 3
+# restart_window_s = 600
 
 # ---- model providers ---------------------------------------------------------------------------
 # One section per provider. The API key is NEVER written here: `key_env` is the NAME of an

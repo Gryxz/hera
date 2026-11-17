@@ -77,7 +77,16 @@ def main(argv: list[str] | None = None) -> int:
     psub.add_parser("list", help="name, kind, tier, host and whether the key variable is set")
     pc = psub.add_parser("check", help="send one fixed test prompt to a provider")
     pc.add_argument("name")
+    hs = sub.add_parser("host", help="the supervised local model host (needs [local_model].command)")
+    hsub = hs.add_subparsers(dest="hcmd", required=True)
+    hsub.add_parser("status", help="state, pid, port, context cap, free memory, restarts, last error")
+    hsub.add_parser("start", help="load the model once to check it works, print its URL and context cap, "
+                                  "then evict it (`hera run` loads it on demand)")
+    hsub.add_parser("stop", help="evict the model if this process has it loaded")
+    hsub.add_parser("reset", help="clear the `failed` state after the restart budget was used up")
     a = ap.parse_args(argv)
+    if a.cmd == "host":
+        return _host(a)
     if a.cmd == "verify":
         return _verify(a)
     if a.cmd == "providers":
@@ -124,7 +133,8 @@ def _providers(a) -> int:
     from .privacy.policy import load_policy
     from .privacy.scanners import BLOCKING, default_scanners
     from .providers.base import Message, ProviderBlocked, ProviderError
-    from .providers.registry import build_providers, effective_url, key_present, url_host
+    from .providers.registry import build_providers, effective_url, host_attachments, key_present, url_host
+    from .modelhost import HostSettings
     from .ledger import BudgetExceeded
     cfg_path = paths.config_path()
     if not cfg_path.exists() or not paths.db_path().exists():
@@ -137,16 +147,22 @@ def _providers(a) -> int:
         print(f"error: could not read the configuration: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
     if a.pcmd == "list":
+        hs = HostSettings.from_config(cfg)
         if not cfg.providers:
             print("no providers configured")
-            return 0
         for name, spec in sorted(cfg.providers.items()):
             present = key_present(spec, os.environ)
             key = "n/a (local)" if present is None else ("yes" if present else "no")
             print(f"{name}  kind={spec.kind}  tier={spec.tier}  host={url_host(effective_url(spec)) or '-'}  "
                   f"key present: {key}")
+        if hs.command:
+            attached = host_attachments(cfg)
+            print(f"model host: supervised on 127.0.0.1:{hs.port}, attached to: "
+                  + (", ".join(attached) if attached else
+                     "NOTHING (no provider of tier 'local' points at that address; the host would never be used)"))
         return 0
     conn = db.connect(paths.db_path())
+    host = None
     try:
         policy = load_policy(paths.policy_dir() / "policy.toml")
         labels = LabelStore(conn)
@@ -154,6 +170,7 @@ def _providers(a) -> int:
                           blocking=BLOCKING)
         ledger = Ledger(conn, cfg.budget, cfg.prices)
         built = build_providers(cfg, gateway, ledger, os.environ)
+        host = built.host
         if a.name not in cfg.providers:
             print(f"error: no provider named {a.name!r} in the configuration", file=sys.stderr)
             return 2
@@ -185,6 +202,7 @@ def _providers(a) -> int:
         print(f"cost: ${usd:.6f}")
         return 0
     finally:
+        _evict_host(host)
         conn.close()
 
 
@@ -371,6 +389,7 @@ def _run(a) -> int:
         print(f"error: could not read the configuration: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
     conn = db.connect(paths.db_path())
+    host = None
     try:
         try:
             cs = checkstore.load(conn, a.checkset)
@@ -388,6 +407,7 @@ def _run(a) -> int:
         budget = cfg.budget if a.max_usd is None else dataclasses.replace(cfg.budget, per_task_usd=a.max_usd)
         ledger = Ledger(conn, budget, cfg.prices)
         built = build_providers(cfg, gateway, ledger, os.environ)
+        host = built.host
         roles = select_roles(built)
         if "default" not in roles and "local" not in roles:
             why = "; ".join(f"{n}: {r}" for n, r in sorted(built.absent.items())) or "none configured"
@@ -406,6 +426,7 @@ def _run(a) -> int:
         print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
     finally:
+        _evict_host(host)
         conn.close()
     return _print_outcome(out)
 
@@ -456,6 +477,7 @@ def _task_continue(a) -> int:
         print(f"error: could not read the configuration: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
     conn = db.connect(paths.db_path())
+    host = None
     try:
         row = conn.execute("SELECT objective, repo_id FROM tasks WHERE id=?", (a.id,)).fetchone()
         if row is None or not row["objective"]:
@@ -471,6 +493,7 @@ def _task_continue(a) -> int:
         gateway = Gateway(conn, labels, GrantStore(conn), {}, scanners=default_scanners(policy), blocking=BLOCKING)
         ledger = Ledger(conn, cfg.budget, cfg.prices)
         built = build_providers(cfg, gateway, ledger, os.environ)
+        host = built.host
         roles = select_roles(built)
         if "default" not in roles and "local" not in roles:
             why = "; ".join(f"{n}: {r}" for n, r in sorted(built.absent.items())) or "none configured"
@@ -493,8 +516,76 @@ def _task_continue(a) -> int:
         print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
     finally:
+        _evict_host(host)
         conn.close()
     return _print_outcome(out)
+
+
+def _evict_host(host) -> None:
+    """End of a run: the model must not stay in memory. Never raises."""
+    if host is None:
+        return
+    try:
+        host.evict("run ended")
+    except Exception:
+        pass
+
+
+def _host(a) -> int:
+    """`hera host status|start|stop|reset`. Exit 2 when no [local_model].command is configured, 3 when
+    the host cannot start. The supervisor lives inside one process, so `start` is a load check (it
+    evicts again) and `stop` only affects a host loaded by this same process; see docs/MODELHOST.md."""
+    from . import config
+    from .modelhost import HostError, HostSettings, ModelHost
+    cfg_path = paths.config_path()
+    if not cfg_path.exists():
+        print(f"no hera.toml; copy config/hera.example.toml to {cfg_path}", file=sys.stderr)
+        return 2
+    try:
+        settings = HostSettings.from_config(config.load(cfg_path))
+    except Exception as e:
+        print(f"error: could not read the configuration: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    if not settings.command:
+        print("no model host is configured: set [local_model].command in hera.toml", file=sys.stderr)
+        return 2
+    host = ModelHost(settings, home=paths.ensure_layout())
+    if a.hcmd == "status":
+        for k, v in host.status().items():
+            print(f"{k}: {v}")
+        return 0
+    if a.hcmd == "reset":
+        try:
+            host.reset()
+        except HostError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 3
+        print("reset: the host can start again")
+        return 0
+    if a.hcmd == "stop":
+        try:
+            host.evict("hera host stop")
+        except HostError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 3
+        st = host.status()
+        print("stopped: nothing of this process is loaded")
+        if st["port_in_use"]:
+            print(f"note: something is listening on 127.0.0.1:{settings.port}; HERA did not start it "
+                  "and will not touch or use it")
+        return 0
+    try:
+        with host.lease() as lease:
+            print(f"url: {lease.url}")
+            print(f"context cap: {lease.context_cap} tokens")
+            print(f"pid: {host.status()['pid']}")
+    except HostError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 3
+    finally:
+        _evict_host(host)
+    print("evicted again: `hera run` loads the model when a local provider needs it")
+    return 0
 
 
 def _clean(text: str, limit: int) -> str:
