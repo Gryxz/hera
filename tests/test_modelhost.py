@@ -71,6 +71,11 @@ def group_gone(pgid: int, timeout: float = 5.0) -> bool:
             os.killpg(pgid, 0)
         except ProcessLookupError:
             return True
+        except PermissionError:
+            # macOS answers EPERM, not ESRCH, when every member of the group is a zombie waiting to
+            # be reaped by launchd. Every process in this group was started by this user, so EPERM
+            # means no live member is left.
+            return True
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.05)
