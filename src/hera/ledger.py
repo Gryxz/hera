@@ -1,6 +1,7 @@
 """Cost ledger and spending caps. The router asks `check` before every paid call;
 hitting a cap ends a task as budget-censored, never as a failure."""
 from __future__ import annotations
+import math
 import sqlite3
 import time
 from .config import Budget, TierPrice
@@ -55,6 +56,9 @@ class Ledger:
         """Raise BudgetExceeded if a call of roughly `estimate_usd` would cross a cap."""
         if tier == "local":
             return
+        if not math.isfinite(estimate_usd) or estimate_usd < 0:
+            # fail closed: a NaN estimate would compare false against every cap
+            raise BudgetExceeded("estimate", 0.0, 0.0)
         now = time.time() if now is None else now
         lt = time.localtime(now)
         day_start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))

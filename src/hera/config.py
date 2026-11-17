@@ -12,6 +12,16 @@ class Budget:
     month_reserve_fraction: float = 0.10
     strong_tier_max_share: float = 0.35
 
+    def __post_init__(self) -> None:
+        # Every comparison with NaN is false, so a NaN cap would silently switch that cap off (TOML
+        # accepts `nan` and `inf`). Caps must be finite and non-negative; fractions within [0, 1].
+        for name in ("per_task_usd", "per_day_usd", "per_month_usd"):
+            _finite_non_negative(f"budget.{name}", getattr(self, name))
+        for name in ("month_reserve_fraction", "strong_tier_max_share"):
+            v = _finite_non_negative(f"budget.{name}", getattr(self, name))
+            if v > 1:
+                raise ValueError(f"budget.{name}: must be between 0 and 1")
+
 
 @dataclass(frozen=True)
 class TierPrice:          # USD per million tokens
@@ -19,6 +29,17 @@ class TierPrice:          # USD per million tokens
     output: float
     cache_read: float = 0.0
     cache_write: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name in ("input", "output", "cache_read", "cache_write"):
+            _finite_non_negative(f"price.{name}", getattr(self, name))
+
+
+def _finite_non_negative(name: str, v) -> float:
+    import math
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+        raise ValueError(f"{name}: must be a finite number of at least 0, got {v!r}")
+    return float(v)
 
 
 PROVIDER_KINDS = ("anthropic", "openai_compat", "grok")

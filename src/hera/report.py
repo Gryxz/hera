@@ -88,9 +88,19 @@ def _receipt_facts(conn: sqlite3.Connection, receipt_id: str | None) -> dict | N
     return {"verdict": verdict["verdict"] if verdict else None,
             "attribution": attr["label"] if attr else None,
             "in_process_only": tuple(ev.get("in_process_only", [])),
-            "unsandboxed": ev.get("mechanism") == "none",
+            "unsandboxed": _unsandboxed(ev),
             "out_of_scope": sum(1 for f in flags if f and f[0] == "out_of_declared_scope"),
             "include_hidden": bool(ev.get("include_hidden", True))}
+
+
+def _unsandboxed(ev: dict) -> bool | None:
+    """True if any part of the verification ran with no sandbox; None if the receipt does not say
+    (an unknown mechanism never counts as verified)."""
+    mech = ev.get("mechanism")
+    if not mech:
+        return None
+    contract = ev.get("contract") or {}
+    return mech == "none" or (bool(contract.get("ran")) and contract.get("mechanism") == "none")
 
 
 def _fallback_receipt(conn: sqlite3.Connection, task_id: str, commit: str | None) -> str | None:

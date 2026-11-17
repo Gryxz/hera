@@ -195,6 +195,14 @@ no room (below), and a task that has not stopped (`hera run` resumes those). The
 `run_task` folds the log as before, so a continuation resumes like any run; continuing, crashing and
 continuing again repeats no request (`tests/test_continue.py` checks the request bodies).
 
+Caps fail closed. `--max-usd` must be a finite amount above 0, and budget caps and prices in
+`hera.toml` must be finite and at least 0 (fractions between 0 and 1): every comparison with NaN is
+false, so `nan` (which TOML accepts) would otherwise switch a cap off. The ledger also refuses a NaN
+or negative call estimate. Every provider of a task must share one ledger and one gateway, because
+a continuation's cap is applied to the ledger the task uses. `--max-usd` given to a continuation is
+recorded in the `continued` event whatever the stop was, so an interrupted continuation resumes
+under the same cap.
+
 | Stopped as | When it can continue | What happens |
 |---|---|---|
 | `BUDGET_CENSORED` | The ledger would allow a call now (checked before anything is logged; if not, the message names the cap and the exit is 3). `--max-usd X` replaces the per-task cap for this continuation only and is recorded in the `continued` event; a continuation that is interrupted resumes under that cap, then it is gone. | An attempt that was cut off goes on as a new attempt on the same candidate, in the same conversation, with a fixed "continued" message (no message if the cut-off attempt had never been answered). It does not use up a retry. If the diagnosis call was what the cap refused, the diagnosis is asked again. |

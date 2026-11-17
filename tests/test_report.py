@@ -84,6 +84,10 @@ def world(tmp_path_factory):
             doc = json.loads(r["receipt_json"])
             assert doc["evidence"]["mechanism"] == "none"
             doc["evidence"]["mechanism"] = "bwrap"
+            contract = doc["evidence"].get("contract") or {}
+            if contract.get("ran"):                       # the contract runner's mechanism counts too
+                assert contract["mechanism"] == "none"
+                contract["mechanism"] = "bwrap"
             conn.execute("UPDATE receipts SET receipt_json=? WHERE id=?", (json.dumps(doc), r["id"]))
     w = type("World", (), {})()
     w.conn, w.outs, w.rigs = conn, outs, rigs
@@ -257,3 +261,13 @@ def test_running_attempts_have_no_record_and_attempts_without_a_log_still_do(con
     assert r.declared_scope == ("a.py",)
     s = report.summary([r])
     assert s["verdicts"]["not_verified"] == {"budget_censored": 1} and s["attribution"]["not_attributed"]["not verified"] == 1
+
+
+def test_a_verdict_counts_as_sandboxed_only_if_every_runner_was_and_the_receipt_says_so():
+    u = report._unsandboxed
+    assert u({"mechanism": "bwrap"}) is False
+    assert u({"mechanism": "bwrap", "contract": {"ran": True, "mechanism": "bwrap"}}) is False
+    assert u({"mechanism": "bwrap", "contract": {"ran": True, "mechanism": "none"}}) is True
+    assert u({"mechanism": "bwrap", "contract": {"ran": False, "mechanism": ""}}) is False
+    assert u({"mechanism": "none"}) is True
+    assert u({}) is None and u({"mechanism": ""}) is None   # unknown: never counted as verified

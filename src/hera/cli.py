@@ -6,6 +6,18 @@ from .privacy import translog
 from .store import db
 
 
+def _usd(text: str) -> float:
+    """A dollar cap from the command line: finite and above 0 (`nan` would switch the cap off)."""
+    import math
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not math.isfinite(v) or v <= 0:
+        raise argparse.ArgumentTypeError(f"must be a finite amount above 0, got {text!r}")
+    return v
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="hera")
     ap.add_argument("--version", action="version", version=__version__)
@@ -33,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     rn.add_argument("--task", required=True)
     rn.add_argument("--checkset", required=True, help="check-set hash printed by `hera checks freeze`")
     rn.add_argument("--objective", required=True)
-    rn.add_argument("--max-usd", type=float, help="per-task dollar cap (default: the budget in hera.toml)")
+    rn.add_argument("--max-usd", type=_usd, help="per-task dollar cap (default: the budget in hera.toml)")
     rn.add_argument("--allow-unsandboxed", action="store_true",
                     help="run with NO network or filesystem isolation if no sandbox mechanism exists")
     tk = sub.add_parser("task", help="inspect a task")
@@ -43,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     tc = tksub.add_parser("continue", help="continue a task that stopped as BUDGET_CENSORED, PROVIDER_ERROR "
                                            "or (once resolved) AWAITING_DISPUTE")
     tc.add_argument("id")
-    tc.add_argument("--max-usd", type=float,
+    tc.add_argument("--max-usd", type=_usd,
                     help="per-task dollar cap for this continuation only (default: the budget in hera.toml)")
     tc.add_argument("--allow-unsandboxed", action="store_true",
                     help="run with NO network or filesystem isolation if no sandbox mechanism exists")

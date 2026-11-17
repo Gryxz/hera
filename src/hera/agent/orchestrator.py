@@ -21,6 +21,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -299,6 +300,9 @@ class _Run:
         if not self.roles:
             raise TaskConfigError("no provider for the default tier")
         first = next(iter(self.roles.values()))
+        if any(p.ledger is not first.ledger or p.gateway is not first.gateway for p in self.roles.values()):
+            # caps (including a continuation's per-task cap) and privacy decisions must be one set
+            raise TaskConfigError("every provider of a task must share one ledger and one gateway")
         self.labels = first.gateway.labels
         self.ledger: Ledger = first.ledger
         self.adapter = PytestAdapter()
@@ -628,10 +632,12 @@ class _Run:
         if v.last_ended is None:
             raise ContinueRefused("the task has no finished attempt to continue from")
         detail: dict = {"from_status": status, "stopped_reason": v.stopped.get("reason", "")}
+        if max_usd is not None:
+            if not math.isfinite(max_usd) or max_usd <= 0:
+                raise ContinueRefused("max_usd must be a finite amount above 0")
+            detail["max_usd"] = max_usd     # logged for every reason: a resumed continuation keeps it
         if status == P.BUDGET_CENSORED:
             detail["reason"] = "budget"
-            if max_usd is not None:
-                detail["max_usd"] = max_usd
         elif status == P.PROVIDER_ERROR:
             detail["reason"] = "provider_error"
         else:
