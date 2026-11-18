@@ -194,8 +194,6 @@ def test_send_result_defaults_to_not_arrived():
 @pytest.mark.parametrize("exc", [
     ConnectionRefusedError(),
     socket.gaierror(socket.EAI_NONAME, "no such host"),
-    ssl.SSLError("handshake failure"),
-    ssl.SSLCertVerificationError("certificate verify failed"),
     urllib.error.URLError(ConnectionRefusedError()),
     urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, "no such host")),
     urllib.error.URLError(ssl.SSLError("handshake failure")),
@@ -219,6 +217,10 @@ def test_failures_before_any_bytes_left_did_not_arrive(exc):
     urllib.error.URLError(socket.timeout("timed out")),
     urllib.error.URLError(ConnectionResetError()),
     urllib.error.URLError("some text reason"),
+    # a bare TLS error is raised while waiting for or reading the reply: the request was complete
+    ssl.SSLEOFError("EOF occurred in violation of protocol"),
+    ssl.SSLZeroReturnError("TLS/SSL connection has been closed"),
+    ssl.SSLError("decryption failed or bad record mac"),
 ])
 def test_other_failures_may_have_arrived(exc):
     assert _may_have_arrived(exc) is True

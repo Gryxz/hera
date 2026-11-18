@@ -71,14 +71,23 @@ class SendResult:
 def _may_have_arrived(exc: BaseException) -> bool:
     """Could the request body have reached the destination before `exc` ended the call?
 
-    False only for failures that certainly came before any request bytes were sent: a refused
+    False only for failures that certainly came before the request was complete: a refused
     connection, a name-resolution failure, a TLS handshake or certificate failure. Everything else
     is True, including every timeout (a connect timeout and a read timeout look alike), resets,
     disconnects, short reads, broken pipes and unknown exceptions: unrecorded spend is the unsafe side.
-    urllib wraps errors raised while connecting in URLError, so its `.reason` is classified instead."""
-    if isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError):
+
+    urllib wraps in URLError only what is raised while connecting and sending the request
+    (`h.request`); errors while waiting for or reading the reply are raised as they are. So a TLS
+    error counts as "not arrived" only when it came wrapped: a bare one (for example SSLEOFError
+    while reading the reply) happened after the whole request had been sent."""
+    wrapped = isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError)
+    if wrapped:
         exc = exc.reason
-    return not isinstance(exc, (ConnectionRefusedError, socket.gaierror, ssl.SSLError))
+    if isinstance(exc, (ConnectionRefusedError, socket.gaierror)):
+        return False
+    if isinstance(exc, ssl.SSLError):
+        return not wrapped
+    return True
 
 
 class _Blocked(Exception):

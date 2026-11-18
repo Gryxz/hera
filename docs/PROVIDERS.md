@@ -52,9 +52,10 @@ the send but no response came back) raises `ProviderError`, so the recovery ladd
 provider failure and never as a privacy block. After a transport failure the request may still have
 reached the provider and been billed, so the ledger is charged for it: the gateway sets
 `SendResult.may_have_arrived`, which is `False` only when the failure certainly came before any
-request bytes left (connection refused, name resolution failure, TLS handshake or certificate
-failure; urllib's `URLError` is unwrapped to its `.reason` first). Everything else counts as "may have
-arrived": timeouts (a connect and a read timeout look alike), resets, disconnects, short reads, broken
+request was complete (connection refused, name resolution failure, TLS handshake or certificate
+failure). urllib wraps in `URLError` only what is raised while connecting and sending, so a TLS error
+counts as "not arrived" only when it came wrapped; a bare one (raised while reading the reply) came
+after the whole request was sent. Everything else counts as "may have arrived": timeouts (a connect and a read timeout look alike), resets, disconnects, short reads, broken
 pipes and any unknown exception. In that case, on a non-`local` tier, the provider records one row
 costing the pre-call estimate (the figure the cap check used) with purpose
 `<purpose>:transport_error:estimated`, then raises `ProviderError`. The estimate is conservative (an
