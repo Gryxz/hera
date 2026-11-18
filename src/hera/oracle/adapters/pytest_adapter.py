@@ -346,14 +346,49 @@ def _read_results(path: Path) -> bytes | None:
     return data
 
 
-def _status_of(tc: ET.Element) -> tuple[CheckStatus, str]:
-    for tag, status in (("failure", CheckStatus.FAIL), ("error", CheckStatus.ERROR),
-                        ("skipped", CheckStatus.SKIP)):
-        el = tc.find(tag)
-        if el is not None:
-            text = (el.text or "").strip() or (el.get("message") or "")
-            return status, text
-    return CheckStatus.PASS, ""
+_TEARDOWN_MARK = "failed on teardown"
+
+
+def _parts_of(tc: ET.Element) -> list[tuple[CheckStatus, str]]:
+    """Every outcome element of one ``<testcase>``, in document order (none: the case passed)."""
+    out: list[tuple[CheckStatus, str]] = []
+    for el in tc:
+        status = {"failure": CheckStatus.FAIL, "error": CheckStatus.ERROR,
+                  "skipped": CheckStatus.SKIP}.get(el.tag)
+        if status is not None:
+            out.append((status, (el.text or "").strip() or (el.get("message") or "")))
+    return out or [(CheckStatus.PASS, "")]
+
+
+def _teardown_error_only(tc: ET.Element) -> bool:
+    """True if every outcome element of the case is an ``<error>`` pytest wrote for a failed teardown."""
+    els = [el for el in tc if el.tag in ("failure", "error", "skipped")]
+    return bool(els) and all(el.tag == "error" and (el.get("message") or "").startswith(_TEARDOWN_MARK)
+                             for el in els)
+
+
+def _outcomes(root: ET.Element) -> list[tuple[ET.Element, list[tuple[CheckStatus, str]]]]:
+    """``(testcase, [(status, text), ...])`` for every ``<testcase>``, one entry per outcome pytest counts.
+
+    pytest writes a fixture teardown error after a PASSING test body into the same ``<testcase>`` as
+    the only child (an ``<error>`` "failed on teardown"), while its summary line counts the body as
+    passed AND the teardown as an error ("1 passed, 1 error"). Such a case is split into the body's
+    pass plus the error, so JUnit, summary and exit code can agree. After a failing or skipped body the
+    teardown error is a second ``<testcase>`` of the same name (or an extra child), which already
+    counts once, so no pass is added there."""
+    cases = [(tc, _parts_of(tc)) for tc in root.iter("testcase")]
+
+    def key(tc):
+        return tc.get("classname") or "", tc.get("name") or ""
+    teardown_only = [i for i, (tc, _parts) in enumerate(cases) if _teardown_error_only(tc)]
+    siblings: dict[tuple[str, str], int] = {}
+    for tc, _parts in cases:
+        siblings[key(tc)] = siblings.get(key(tc), 0) + 1
+    for i in teardown_only:
+        tc, parts = cases[i]
+        if siblings[key(tc)] == 1:                      # no other record of this test: its body passed
+            cases[i] = (tc, [(CheckStatus.PASS, ""), *parts])
+    return cases
 
 
 def _combine(cases: list[tuple[CheckStatus, str, float]]) -> tuple[CheckStatus, str, float]:
@@ -410,34 +445,35 @@ def _parse(checkout: Path, checkset: CheckSet, include_hidden: bool, rr) -> RunR
     tally = {"pass": 0, "fail": 0, "skip": 0}
     any_fail = False
     if root is not None:
-        for tc in root.iter("testcase"):
+        for tc, parts in _outcomes(root):
             cls, name = tc.get("classname") or "", tc.get("name") or ""
-            status, text = _status_of(tc)
             try:
                 dur = float(tc.get("time") or 0.0)
             except ValueError:
                 dur = 0.0
-            tally["pass" if status is CheckStatus.PASS else "skip" if status is CheckStatus.SKIP else "fail"] += 1
-            any_fail = any_fail or status in (CheckStatus.FAIL, CheckStatus.ERROR)
+            for status, _t in parts:
+                tally["pass" if status is CheckStatus.PASS else "skip" if status is CheckStatus.SKIP else "fail"] += 1
+                any_fail = any_fail or status in (CheckStatus.FAIL, CheckStatus.ERROR)
+            entries = [(status, text, dur if i == 0 else 0.0) for i, (status, text) in enumerate(parts)]
             if cls == "" and name in modules:            # collection error: the whole file
                 kind, rel = modules[name]
                 if kind == "sentinel":
                     for k in sentinel:
-                        sentinel[k].append((status, text, dur))
+                        sentinel[k].extend(entries)
                 for c in expected:
                     if (c.visibility, c.relpath) == (kind, rel):
-                        per_check.setdefault(c.check_id, []).append((status, text, dur))
+                        per_check.setdefault(c.check_id, []).extend(entries)
                 continue
             fn = name.split("[", 1)[0]
             if cls == SENTINEL_MODULE and fn in sentinel:
-                sentinel[fn].append((status, text, dur))
+                sentinel[fn].extend(entries)
                 continue
             c = by_key.get((cls, fn))
             if c is None:
                 if len(unmatched) < 200:
                     unmatched.append(f"{cls}::{name}"[:200])
                 continue
-            per_check.setdefault(c.check_id, []).append((status, text, dur))
+            per_check.setdefault(c.check_id, []).extend(entries)
 
     results: list[CheckResult] = []
     texts: dict[str, str] = {}
@@ -488,12 +524,12 @@ def _parse_project(checkout: Path, rr) -> ProjectRunReport:
     cases: dict[str, list[CheckStatus]] = {}
     tally = {"pass": 0, "fail": 0, "skip": 0}
     any_fail = False
-    for tc in root.iter("testcase"):
+    for tc, parts in _outcomes(root):
         cls, name = tc.get("classname") or "", tc.get("name") or ""
-        status, _text = _status_of(tc)
-        tally["pass" if status is CheckStatus.PASS else "skip" if status is CheckStatus.SKIP else "fail"] += 1
-        any_fail = any_fail or status in (CheckStatus.FAIL, CheckStatus.ERROR)
-        cases.setdefault(f"{cls}::{name}" if cls else name, []).append(status)
+        for status, _text in parts:
+            tally["pass" if status is CheckStatus.PASS else "skip" if status is CheckStatus.SKIP else "fail"] += 1
+            any_fail = any_fail or status in (CheckStatus.FAIL, CheckStatus.ERROR)
+            cases.setdefault(f"{cls}::{name}" if cls else name, []).append(status)
     statuses: dict[str, CheckStatus] = {}
     for tid, sts in cases.items():
         if CheckStatus.FAIL in sts:

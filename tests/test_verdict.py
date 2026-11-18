@@ -45,3 +45,9 @@ def test_dispute_pauses_and_flaky_checks_are_excluded():
     assert verdict(receipt(flaky_fail))[0] is V.PASS
     only_invalid = [C("v1", ("R-1",), S.FAIL, health=H.INVALID)]
     assert verdict(receipt(only_invalid))[0] is V.UNVERIFIABLE
+
+
+def test_unvalidated_checks_count_exactly_like_valid_ones():
+    unval = [C("v1", ("R-1",), S.FAIL, health=H.UNVALIDATED), C("h1", ("R-1",), S.PASS, visibility="hidden")]
+    assert verdict(receipt(unval))[0] is V.FAIL
+    assert verdict(receipt([replace(c, health=H.UNVALIDATED) for c in OK])) == (V.PASS, [])

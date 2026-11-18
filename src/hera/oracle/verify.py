@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 
 from .. import sandbox
-from ..types import Attribution, CheckHealth, CheckResult, CheckStatus, Receipt, Verdict
+from ..types import COUNTED_HEALTH, Attribution, CheckHealth, CheckResult, CheckStatus, Receipt, Verdict
 from ..workspace import TaskRepo, _check_hash
 from . import checkstore
 from .adapters.pytest_adapter import PytestAdapter
@@ -192,13 +192,13 @@ def attribute(v: Verdict, *, results, audit_report: AuditReport, results_parsed:
         return (AttributionRecord(Attribution.IMPL_OVERFIT, "high", "unseen_case_failed",
                                   {"requirements": sorted({q for c in results if c.visibility == "hidden"
                                                            and c.status is not CheckStatus.PASS
-                                                           and c.health in (CheckHealth.VALID, CheckHealth.WEAK)
+                                                           and c.health in COUNTED_HEALTH
                                                            for q in c.requirement_ids})}),
                 False, advisories)
     if v is Verdict.FAIL:
         failing = sorted(c.check_id for c in results if c.visibility == "visible"
                          and c.status is not CheckStatus.PASS
-                         and c.health in (CheckHealth.VALID, CheckHealth.WEAK))
+                         and c.health in COUNTED_HEALTH)
         if not failing:                                   # cannot happen via verdict(); stay safe
             return AttributionRecord(Attribution.UNKNOWN, "low", "fail_without_counted_check", {}), False, advisories
         return (AttributionRecord(Attribution.IMPL_WRONG, "medium" if timed_out else "high",
@@ -239,7 +239,7 @@ def _in_process_only(results, runner_of: dict[str, str]) -> tuple[str, ...]:
     """Requirements whose counted checks all passed and none of those is a contract check."""
     per_req: dict[str, list] = {}
     for r in results:
-        if r.health in (CheckHealth.VALID, CheckHealth.WEAK):
+        if r.health in COUNTED_HEALTH:
             for q in r.requirement_ids:
                 per_req.setdefault(q, []).append(r)
     return tuple(sorted(q for q, rs in per_req.items()
