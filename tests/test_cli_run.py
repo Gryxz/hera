@@ -133,6 +133,74 @@ def test_freeze_refuses_an_invalid_spec_and_freezes_a_valid_one(world, capsys):
     assert freeze(world, "ck2") == 0 and hash_of(capsys.readouterr().out) == h       # idempotent
 
 
+def _stored_health(task):
+    from hera import paths
+    from hera.store import db
+    conn = db.connect(paths.db_path())
+    try:
+        return {r["id"]: (r["health"], r["health_evidence_json"]) for r in conn.execute("SELECT * FROM checks WHERE checkset_hash IN "
+                                                                                      "(SELECT hash FROM checksets WHERE task_id=?)", (task,))}
+    finally:
+        conn.close()
+
+
+def test_freeze_stores_the_validated_health_of_every_check(world, capsys):
+    import json
+    assert freeze(world, "hl1") == 0
+    out = capsys.readouterr().out
+    assert "check chk-r1-basic: valid (missing_feature" in out                 # the one-line summary per check
+    stored = _stored_health("hl1")
+    assert {k: v[0] for k, v in stored.items()} == {"chk-r1-basic": "valid", "chk-r2-empty": "valid",
+                                                    "chk-hidden-r1-seven": "valid", "chk-r3-add": "valid"}
+    ev = json.loads(stored["chk-r3-add"][1])
+    assert ev["rule"] == "regression_passes" and ev["runs"] == 3 and ev["statuses"] == ["pass"] * 3
+    assert "check health" not in out                                           # nothing weak: no extra line
+
+
+def test_freeze_with_skip_validation_records_unvalidated_not_empty(world, capsys):
+    assert freeze(world, "hl2", "spec.toml", "--skip-validation") == 0
+    out = capsys.readouterr().out
+    assert "check chk-r1-basic: unvalidated (not validated on the base commit)" in out
+    assert "check health: 4 unvalidated of 4" in out
+    stored = _stored_health("hl2")
+    assert {v[0] for v in stored.values()} == {"unvalidated"} and len(stored) == 4
+
+
+def test_validation_replaces_unvalidated_when_the_same_set_is_frozen_again(world, capsys):
+    assert freeze(world, "hl3", "spec.toml", "--skip-validation") == 0
+    assert freeze(world, "hl3") == 0                                           # same content, now validated
+    assert {v[0] for v in _stored_health("hl3").values()} == {"valid"}
+    assert freeze(world, "hl3", "spec.toml", "--skip-validation") == 0         # skipping never erases a result
+    assert {v[0] for v in _stored_health("hl3").values()} == {"valid"}
+
+
+def test_weak_checks_are_stored_and_surfaced_in_task_status_and_report(world, capsys):
+    (world.specdir / "weak.toml").write_text(SPEC.replace('kind = "regression"', 'kind = "new"'))
+    world.configure(default=attempt(CORRECT_CALC), strong=[])
+    assert freeze(world, "hl4", "weak.toml") == 0                              # weak is allowed, but recorded
+    out = capsys.readouterr().out
+    assert "check chk-r3-add: weak (passes_before_change" in out and "check health: 1 weak" in out
+    assert _stored_health("hl4")["chk-r3-add"][0] == "weak"
+    h = hash_of(out)
+    assert cli.main(["run", "--task", "hl4", "--checkset", h, "--objective", OBJECTIVE, "--allow-unsandboxed"]) == 0
+    capsys.readouterr()
+    assert cli.main(["task", "status", "hl4"]) == 0
+    assert "check health: 1 weak (pass before the change) of 4" in capsys.readouterr().out
+    assert cli.main(["report"]) == 0
+    assert "weak checks: 1 of 4 in the check sets of 1 task(s): hl4" in capsys.readouterr().out
+    assert cli.main(["report", "--json"]) == 0
+    import json
+    assert json.loads(capsys.readouterr().out)["check_health"] == {
+        "checks": 4, "weak": 1, "tasks_with_weak": ["hl4"]}
+
+
+def test_task_status_without_weak_or_unvalidated_checks_has_no_health_line(world, capsys):
+    assert freeze(world, "hl5") == 0
+    capsys.readouterr()
+    assert cli.main(["task", "status", "hl5"]) == 0
+    assert "check health" not in capsys.readouterr().out
+
+
 def test_freeze_reports_spec_errors(world, capsys):
     (world.specdir / "missing.toml").write_text(SPEC.replace("test_parse_amount.py", "test_no_such_file.py"))
     assert freeze(world, "ck3", "missing.toml") == 2

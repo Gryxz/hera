@@ -46,6 +46,12 @@ class CheckHealth(str, Enum):
     FLAKY = "flaky"
     INVALID = "invalid"
     WEAK = "weak"
+    UNVALIDATED = "unvalidated"        # frozen without validation on the base commit (--skip-validation)
+
+
+# The health labels whose checks count towards a verdict. Flaky and invalid checks do not. An
+# unvalidated check counts: it is exactly what every check was before health was stored.
+COUNTED_HEALTH = (CheckHealth.VALID, CheckHealth.WEAK, CheckHealth.UNVALIDATED)
 
 
 @dataclass(frozen=True)

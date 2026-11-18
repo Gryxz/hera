@@ -117,6 +117,23 @@ INVALID. A sentinel or integrity failure, an unparsable result, a timeout or an 
 `environment_broken`. `ok` means no flaky or invalid checks and a sound environment. Every report
 entry names the rule that fired.
 
+### Health is persisted
+
+`hera checks freeze` writes each check's health into `checks.health` (the label) and
+`checks.health_evidence_json` (`rule`, `reason`, the per-run `statuses`, `runs`) in the same transaction
+that records the check set (`checkstore.freeze(..., health=report.health_rows())`). It is a column update on
+the stored rows, not part of the check-set hash, so the same check set keeps its hash whatever its health.
+Only a set that validated (`ok`) is frozen, so the labels stored through the CLI are `valid` and `weak`.
+A set frozen with `--skip-validation` records every check as `unvalidated` (never empty). Rows written by
+a build before this one hold the old column default `valid`. `unvalidated` counts in verdicts exactly like
+`valid` (`types.COUNTED_HEALTH` is `valid`, `weak`, `unvalidated`; flaky and invalid never count). Freezing
+the same content again with a validation replaces the labels; freezing it again with `--skip-validation`
+leaves a stored result alone. The command prints one line per check (label, rule, reason) and, when any
+check is weak or unvalidated, `check health: 1 weak (pass before the change), ... of N`. `hera task status`
+prints that same line for the task's current check set, and `hera report` prints
+`weak checks: N of M in the check sets of K task(s): ...` when there is a weak check (`check_health` in
+the JSON output, next to `summary`).
+
 ## Verification sequence (`verify.verify`)
 
 `verify(conn, repo, checkset, commit, ...)` returns a `VerificationOutcome`:

@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 from .. import paths
+from ..types import CheckHealth
 from ..workspace import _check_id
 from .contract import load_contract_file
 from .model import (CheckSet, DraftCheck, Requirement, checks_by_runner, validate_draft,  # noqa: F401
@@ -122,8 +123,13 @@ def _check_contract_file(rel: str, data: bytes, drafts: list[DraftCheck]) -> Non
 
 def freeze(conn: sqlite3.Connection, *, task_id: str, requirements, checks,
            files: dict[str, bytes], adapter: str = "pytest", summary_text: str = "",
-           summary_hash: str | None = None) -> CheckSet:
+           summary_hash: str | None = None, health: dict | None = None) -> CheckSet:
     """Hash, write read-only and record a check set. Idempotent for identical content.
+
+    ``health`` maps check id -> ``(CheckHealth, evidence dict)`` from a validation on the base commit and
+    is written to ``checks.health`` / ``checks.health_evidence_json`` (a column update outside the
+    immutable check-set hash). Without it new rows are recorded as ``unvalidated``; rows that already
+    exist keep their health unless ``health`` names them.
 
     ``summary_text`` is part of the manifest (so of the check-set hash); ``hera checks freeze`` passes the
     canonical text of the approved requirements summary. ``summary_hash`` is that summary's hash, stored
@@ -157,6 +163,7 @@ def freeze(conn: sqlite3.Connection, *, task_id: str, requirements, checks,
                   checks=tuple(sorted(checks, key=lambda c: c.check_id)), files=dict(sorted(files_sha.items())),
                   adapter=adapter, root=root, uncovered=_uncovered(requirements, checks))
     doc = _stored_doc(manifest, requirements, summary_text)
+    health_rows = _health_rows(cs, health)            # refuse a bad label before anything is written
 
     if root.exists() or root.is_symlink():
         verify_integrity(cs)             # same hash, different bytes on disk -> raises
@@ -181,11 +188,43 @@ def freeze(conn: sqlite3.Connection, *, task_id: str, requirements, checks,
         _chmod_readonly(root)
         verify_integrity(cs)
 
-    _record(conn, cs, manifest, doc, summary_hash)
+    _record(conn, cs, manifest, doc, summary_hash, health_rows)
     return cs
 
 
-def _record(conn, cs: CheckSet, manifest: dict, doc: bytes, summary_hash: str | None = None) -> None:
+def _health_rows(cs: CheckSet, health: dict | None) -> dict[str, tuple[str, str]]:
+    """Validated ``{check_id: (label, evidence_json)}``; refuses an unknown check id or label."""
+    out: dict[str, tuple[str, str]] = {}
+    ids = {c.check_id for c in cs.checks}
+    for cid, (label, evidence) in (health or {}).items():
+        if cid not in ids:
+            raise ValueError("health: names a check that is not in the check set")
+        out[cid] = (CheckHealth(label).value, json.dumps(evidence, sort_keys=True, ensure_ascii=True))
+    return out
+
+
+def health_counts(conn: sqlite3.Connection, checkset_hash: str) -> dict[str, int]:
+    """Number of checks per stored health label (a NULL label counts as ``valid``, as verification reads it)."""
+    counts: dict[str, int] = {}
+    for row in conn.execute("SELECT health FROM checks WHERE checkset_hash=?", (checkset_hash,)):
+        label = row["health"] or CheckHealth.VALID.value
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def health_line(counts: dict[str, int]) -> str | None:
+    """One line for ``hera task status`` and ``hera report``: only when a weak or unvalidated check
+    exists (None when every check is valid, flaky and invalid ones cannot be frozen through the CLI)."""
+    weak, unvalidated = counts.get("weak", 0), counts.get("unvalidated", 0)
+    if not weak and not unvalidated:
+        return None
+    parts = ([f"{weak} weak (pass before the change)"] if weak else []) + \
+            ([f"{unvalidated} unvalidated"] if unvalidated else [])
+    return f"check health: {', '.join(parts)} of {sum(counts.values())}"
+
+
+def _record(conn, cs: CheckSet, manifest: dict, doc: bytes, summary_hash: str | None = None,
+            health: dict | None = None) -> None:
     now = time.time()
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -200,9 +239,12 @@ def _record(conn, cs: CheckSet, manifest: dict, doc: bytes, summary_hash: str | 
             raise ValueError("summary_hash: this check set is already recorded with a different summary")
         for c in cs.checks:
             conn.execute("INSERT OR IGNORE INTO checks(id, checkset_hash, requirement_id, kind, visibility, sha256,"
-                         " author_model, author_role, health) VALUES (?,?,?,?,?,?,?,?,'valid')",
+                         " author_model, author_role, health) VALUES (?,?,?,?,?,?,?,?,'unvalidated')",
                          (c.check_id, cs.hash, ",".join(sorted(c.requirement_ids)), c.kind, c.visibility,
                           cs.files[c.relpath], c.author_model, c.author_role))
+            if health and c.check_id in health:
+                conn.execute("UPDATE checks SET health=?, health_evidence_json=? WHERE id=? AND checkset_hash=?",
+                             (*health[c.check_id], c.check_id, cs.hash))
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")

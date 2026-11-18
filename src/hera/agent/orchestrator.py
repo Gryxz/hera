@@ -41,7 +41,7 @@ from ..privacy.gate import permitted_destinations
 from ..privacy.labels import derive, label_builtin, label_bytes
 from ..privacy.policy import Policy
 from ..providers.base import BaseProvider, Message, ProviderBlocked, ProviderError, estimate_usd
-from ..types import CheckHealth, CheckStatus, Label
+from ..types import COUNTED_HEALTH, CheckStatus, Label
 from ..workspace import TaskRepo
 from . import policy as P
 from .loop import attempt_id_for, replay_messages, run_attempt
@@ -475,9 +475,8 @@ class _Run:
             feedback = render_feedback(out_fb)
         else:
             feedback = render_feedback(out)
-        counted = (CheckHealth.VALID, CheckHealth.WEAK)
         failing = sorted(r.check_id for r in out.receipt.results
-                         if r.status is not CheckStatus.PASS and r.health in counted)
+                         if r.status is not CheckStatus.PASS and r.health in COUNTED_HEALTH)
         failing += sorted("regression:" + t for t in out.receipt.regressions)
         self._emit("verified", {
             "attempt": d["attempt"], "commit": d["final_commit"], "receipt_id": out.receipt_id,

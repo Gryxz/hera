@@ -195,3 +195,35 @@ def test_supersede(conn, hera_home):
     other = do_freeze(conn, task_id="other")
     with pytest.raises(ValueError):
         supersede(conn, a.hash, other.hash)
+
+
+def test_new_rows_are_unvalidated_and_health_is_a_column_update_outside_the_hash(conn, hera_home):
+    import json
+    from hera.types import CheckHealth
+    cs = do_freeze(conn)
+    assert {r[0] for r in conn.execute("SELECT health FROM checks")} == {"unvalidated"}
+    assert checkstore.health_counts(conn, cs.hash) == {"unvalidated": len(CHECKS)}
+    again = do_freeze(conn, health={"chk-r1-basic": (CheckHealth.WEAK, {"rule": "passes_before_change"})})
+    assert again.hash == cs.hash                                   # health is not part of the hash
+    verify_integrity(again)
+    rows = {r["id"]: r for r in conn.execute("SELECT * FROM checks WHERE checkset_hash=?", (cs.hash,))}
+    assert rows["chk-r1-basic"]["health"] == "weak"
+    assert json.loads(rows["chk-r1-basic"]["health_evidence_json"]) == {"rule": "passes_before_change"}
+    assert rows["chk-r2-empty"]["health"] == "unvalidated"
+    assert checkstore.health_line(checkstore.health_counts(conn, cs.hash)) == \
+        f"check health: 1 weak (pass before the change), {len(CHECKS) - 1} unvalidated of {len(CHECKS)}"
+    do_freeze(conn)                                                # freezing again without health keeps the result
+    assert conn.execute("SELECT health FROM checks WHERE id='chk-r1-basic'").fetchone()[0] == "weak"
+
+
+def test_health_refuses_unknown_checks_and_labels(conn, hera_home):
+    from hera.types import CheckHealth
+    with pytest.raises(ValueError):
+        do_freeze(conn, health={"no-such-check": (CheckHealth.WEAK, {})})
+    with pytest.raises(ValueError):
+        do_freeze(conn, health={"chk-r1-basic": ("great", {})})
+    assert conn.execute("SELECT COUNT(*) FROM checks").fetchone()[0] == 0     # nothing half-recorded
+
+
+def test_health_line_is_silent_when_everything_is_valid():
+    assert checkstore.health_line({"valid": 3}) is None and checkstore.health_line({}) is None

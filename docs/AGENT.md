@@ -309,7 +309,8 @@ as conclusions.
 3. `hera checks freeze --task T --repo /path/to/repo --spec spec.toml --summary HASH [--base COMMIT] [--allow-unsandboxed]`
    needs that approved summary (same task, requirements exactly equal to the spec's) and creates the task workspace if needed, runs the checks on the base commit in a scratch store (refusing,
    with exit 3 and per-check health, if any check is flaky or invalid; `--skip-validation` overrides),
-   freezes them and prints `check-set hash: <hash>`. The repository must be in the privacy policy with
+   freezes them (storing each check's health in `checks.health`; `--skip-validation` stores `unvalidated`)
+   and prints `check-set hash: <hash>`. The repository must be in the privacy policy with
    its class, or it counts as sensitive and no remote provider will be used.
 4. `hera providers check <name>` for each provider in hera.toml (the keys come from the environment).
 5. `hera run --task T --checkset HASH --objective "..." [--max-usd X] [--without-approved-summary] [--allow-unsandboxed]` prints each

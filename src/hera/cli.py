@@ -331,6 +331,7 @@ def _checks_freeze(a) -> int:
     old_home = os.environ.get("HERA_HOME")
     checkouts = []
     repo = None
+    health = None
     try:
         try:
             reqs, checks, files = _read_spec(a.spec)
@@ -365,6 +366,7 @@ def _checks_freeze(a) -> int:
                     print("not frozen: the check set did not validate on the base commit "
                           "(use --skip-validation to freeze anyway)")
                     return 3
+                health = report.health_rows()
         finally:
             if old_home is None:
                 os.environ.pop("HERA_HOME", None)
@@ -378,7 +380,10 @@ def _checks_freeze(a) -> int:
             if scratch_home:
                 _rm_tree(Path(scratch_home))
         cs = checkstore.freeze(conn, task_id=a.task, requirements=reqs, checks=checks, files=files,
-                               summary_text=canonical_json(summary), summary_hash=a.summary.lower())
+                               summary_text=canonical_json(summary), summary_hash=a.summary.lower(), health=health)
+        stored = checkstore.health_counts(conn, cs.hash)
+        by_id = {r["id"]: r["health"] for r in conn.execute(
+            "SELECT id, health FROM checks WHERE checkset_hash=?", (cs.hash,))}
         policy = load_policy(paths.policy_dir() / "policy.toml")
         repo_id = policy.repo_for_path(a.repo) or ""
         conn.execute("INSERT OR IGNORE INTO tasks(id, repo_id, objective, status, created_at, updated_at) "
@@ -390,6 +395,12 @@ def _checks_freeze(a) -> int:
         return 2
     finally:
         conn.close()
+    if health is None:                       # --skip-validation: say what was stored, per check
+        for check in cs.checks:
+            print(f"check {check.check_id}: {by_id.get(check.check_id) or 'valid'} (not validated on the base commit)")
+    line = checkstore.health_line(stored)
+    if line:
+        print(line)
     if cs.uncovered:
         print("note: requirement(s) with no check: " + ", ".join(cs.uncovered))
     if not repo_id:
@@ -760,13 +771,18 @@ def _report(a) -> int:
         return 2
     try:
         recs = report.attempt_records(conn, since=since, task_id=a.task)
+        health = report.check_health(conn, sorted({r.task_id for r in recs}))
     finally:
         conn.close()
     summ = report.summary(recs)
     if a.json:
-        print(json.dumps({"summary": summ, "attempts": [r.to_dict() for r in recs]}, indent=2, sort_keys=True))
+        print(json.dumps({"summary": summ, "check_health": health, "attempts": [r.to_dict() for r in recs]}, indent=2, sort_keys=True))
     else:
         print(report.render_summary(summ))
+        if health["weak"]:
+            print(f"weak checks: {health['weak']} of {health['checks']} in the check sets of "
+                  f"{len(health['tasks_with_weak'])} task(s): {', '.join(health['tasks_with_weak'])} "
+                  f"(a weak check passes before the change)")
     return 0
 
 
@@ -833,6 +849,14 @@ def _task_summary_line(conn, task_id: str) -> str:
     return f"summary: {sh} NOT APPROVED ({'no decision yet' if st == 'none' else st})"
 
 
+def _task_health_line(conn, task_id: str) -> str | None:
+    """The check-health line of the task's current check set (None when all valid or no check set)."""
+    from .agent.orchestrator import task_checkset_hash
+    from .oracle import checkstore
+    h = task_checkset_hash(conn, task_id)
+    return checkstore.health_line(checkstore.health_counts(conn, h)) if h else None
+
+
 def _task_status(a) -> int:
     from .agent.orchestrator import load_events
     conn = _open_db()
@@ -842,12 +866,15 @@ def _task_status(a) -> int:
         row = conn.execute("SELECT status FROM tasks WHERE id=?", (a.id,)).fetchone()
         events = load_events(conn, a.id)
         summary_line = _task_summary_line(conn, a.id)
+        health_line = _task_health_line(conn, a.id)
     finally:
         conn.close()
     if row is None and not events:
         print(f"error: no such task: {a.id}", file=sys.stderr)
         return 2
     print(summary_line)
+    if health_line:
+        print(health_line)
     for ev in events:
         print(f"[{ev['seq']}] {format_event(ev)}")
     print(f"status: {row['status'] if row else 'unknown'}")
