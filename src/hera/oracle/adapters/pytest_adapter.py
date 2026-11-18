@@ -87,6 +87,7 @@ def _norm(path: str) -> str:
 
 class PytestAdapter:
     name = "pytest"
+    runner = "pytest"                  # DraftCheck.runner of the checks this adapter runs natively
 
     def __init__(self) -> None:
         self._prepared: dict[str, tuple[str, bool]] = {}

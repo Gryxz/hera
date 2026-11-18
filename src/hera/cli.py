@@ -285,13 +285,19 @@ def _open_db():
 
 
 def _read_spec(spec_path):
-    """SPEC.toml -> (requirements, checks, files). ValueError names the problem, never file content."""
+    """SPEC.toml -> (requirements, checks, files, adapter name). ValueError names the problem, never
+    file content. The optional top-level ``adapter`` ("pytest", the default, or "node") selects the
+    adapter, and is the default ``runner`` of every check that does not name one."""
     import tomllib
     from pathlib import Path
-    from .oracle.model import DraftCheck, Requirement
+    from .oracle.adapters import ADAPTER_NAMES
+    from .oracle.model import NATIVE_RUNNER, DraftCheck, Requirement
     sp = Path(spec_path)
     with sp.open("rb") as fh:
         raw = tomllib.load(fh)
+    adapter_name = raw.get("adapter", "pytest")
+    if adapter_name not in ADAPTER_NAMES:
+        raise ValueError("adapter: must be one of " + ", ".join(ADAPTER_NAMES))
     reqs = [Requirement(str(r["id"]), str(r["text"])) for r in raw.get("requirement", [])]
     base = sp.resolve().parent
     checks, files = [], {}
@@ -302,14 +308,15 @@ def _read_spec(spec_path):
             checks.append(DraftCheck(str(c["id"]), tuple(str(x) for x in c["requirements"]), vis, rel,
                                      str(c["node"]), author_role=str(c.get("author_role", vis)),
                                      author_model=str(c.get("author_model", "human")),
-                                     kind=str(c.get("kind", "new")), runner=str(c.get("runner", "pytest"))))
+                                     kind=str(c.get("kind", "new")),
+                                     runner=str(c.get("runner", NATIVE_RUNNER[adapter_name]))))
         except KeyError as e:
             raise ValueError(f"check: missing key {e.args[0]!r}") from None
         target = (base / rel).resolve()
         if base not in target.parents or not target.is_file():
             raise ValueError("check.file: must name a file inside the spec's directory")
         files[rel] = target.read_bytes()
-    return reqs, checks, files
+    return reqs, checks, files, adapter_name
 
 
 def _checks_freeze(a) -> int:
@@ -319,7 +326,7 @@ def _checks_freeze(a) -> int:
     import time
     from pathlib import Path
     from .oracle import checkstore
-    from .oracle.adapters.pytest_adapter import PytestAdapter
+    from .oracle.adapters import get_adapter
     from .oracle.summary import approved_summary_for, canonical_json, requirement_diff
     from .oracle.validation import validate_on_base
     from .privacy.policy import load_policy
@@ -334,7 +341,7 @@ def _checks_freeze(a) -> int:
     health = None
     try:
         try:
-            reqs, checks, files = _read_spec(a.spec)
+            reqs, checks, files, adapter_name = _read_spec(a.spec)
             summary = approved_summary_for(conn, a.task, a.summary)
             differing = requirement_diff(summary, reqs)
             if differing:
@@ -346,12 +353,13 @@ def _checks_freeze(a) -> int:
                     raise ValueError("the task already exists with a different base commit")
             except FileNotFoundError:
                 repo = TaskRepo.create(a.task, a.repo, a.base)
-            adapter = PytestAdapter()
+            adapter = get_adapter(adapter_name)
             if not a.skip_validation:
                 scratch_home = tempfile.mkdtemp(prefix="hera-validate-")
                 os.environ["HERA_HOME"] = scratch_home          # the draft is frozen in a scratch store
                 scratch = db.connect(":memory:")
-                draft = checkstore.freeze(scratch, task_id=a.task, requirements=reqs, checks=checks, files=files)
+                draft = checkstore.freeze(scratch, task_id=a.task, requirements=reqs, checks=checks, files=files,
+                                          adapter=adapter_name)
 
                 def factory():
                     co = repo.verification_checkout(repo.base_commit)
@@ -380,7 +388,8 @@ def _checks_freeze(a) -> int:
             if scratch_home:
                 _rm_tree(Path(scratch_home))
         cs = checkstore.freeze(conn, task_id=a.task, requirements=reqs, checks=checks, files=files,
-                               summary_text=canonical_json(summary), summary_hash=a.summary.lower(), health=health)
+                               adapter=adapter_name, summary_text=canonical_json(summary), summary_hash=a.summary.lower(),
+                               health=health)
         stored = checkstore.health_counts(conn, cs.hash)
         by_id = {r["id"]: r["health"] for r in conn.execute(
             "SELECT id, health FROM checks WHERE checkset_hash=?", (cs.hash,))}
@@ -884,6 +893,7 @@ def _task_status(a) -> int:
 def _verify(a) -> int:
     """Exit 0 for PASS, 3 for any other verdict, 2 for an environment or store error."""
     from .oracle import checkstore
+    from .oracle.adapters import get_adapter
     from .oracle.verify import render_feedback, verify
     from .workspace import TaskRepo
     if not paths.db_path().exists():
@@ -893,7 +903,7 @@ def _verify(a) -> int:
     try:
         repo = TaskRepo.open(a.task)
         cs = checkstore.load(conn, a.checkset)
-        out = verify(conn, repo, cs, a.commit, include_hidden=not a.no_hidden,
+        out = verify(conn, repo, cs, a.commit, adapter=get_adapter(cs.adapter), include_hidden=not a.no_hidden,
                      allow_unsandboxed=a.allow_unsandboxed)
     except Exception as e:                      # store, workspace, sandbox or argument problems
         print(f"error: {type(e).__name__}: {e}", file=sys.stderr)

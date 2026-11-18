@@ -34,7 +34,7 @@ Version 1, 2026-11-14. Derived from the review documents (`07_REVISED_ARCHITECTU
 
 | Milestone | Content |
 |---|---|
-| 0.2 Second language and stronger checks | TypeScript/JavaScript adapter; diff-scoped mutation testing; final-only hidden slice; verifier in a per-run VM or container |
+| 0.2 Second language and stronger checks | TypeScript/JavaScript adapter **built** (`node` adapter on Node's built-in `node:test`: `.test.js`, `.test.mjs`, `.test.ts`, `.test.mts` through type stripping, no npm packages; jest and vitest are future work; see [ORACLE.md](ORACLE.md), "Node adapter"); diff-scoped mutation testing; final-only hidden slice; verifier in a per-run VM or container |
 | 0.3 First worker | Execution worker on the x86 PC (WSL2 or Linux), outbound connection over a private network, capability probe, leases; conformance test = same check set gives the same results on both machines |
 | 0.4 Shared inference | 9B and 30B endpoints on the PC; two-machine split on one network; split across two homes; the 80B coder pooled across three or more machines; decision rule from `08_MODEL_MATRIX` §7 |
 | 0.5 Knowledge | OKF bundles for distilled knowledge, trust tiers, lexical retrieval, one bundle per privacy level |

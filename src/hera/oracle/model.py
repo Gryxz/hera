@@ -1,6 +1,7 @@
 """Check objects of the acceptance oracle (S7a).
 
-One check is one pytest test function. A draft check belongs to exactly one file of the check
+One check is one pytest test function (adapter "pytest"), one top-level node:test test (adapter
+"node") or one contract check. A draft check belongs to exactly one file of the check
 set; a file holds checks of one visibility only (visible files may be shown to the implementer,
 hidden files never are). Validation errors name the offending field and never echo file
 contents.
@@ -17,19 +18,26 @@ _REQ_ID = re.compile(r"R-[0-9]{1,4}")
 _CHECK_ID = re.compile(r"[A-Za-z0-9_.-]{1,80}")
 _NODE = re.compile(r"test_[A-Za-z0-9_]*")
 _CONTRACT_NODE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+_NODE_TEST_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_ .:-]{0,119}")
 _SEGMENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 VISIBILITIES = ("visible", "hidden")
 KINDS = ("new", "regression")
-RUNNERS = ("pytest", "contract")
+RUNNERS = ("pytest", "node", "contract")
 CONTRACT_SUFFIX = ".contract.toml"
+NODE_SUFFIXES = (".test.js", ".test.mjs", ".test.ts", ".test.mts")
+NODE_TS_SUFFIXES = (".test.ts", ".test.mts")
+NODE_RESERVED_NAMES = ("hera_must_pass", "hera_must_fail")      # the node adapter's sentinel tests
+# The runner that an adapter executes natively (contract checks run under any adapter).
+NATIVE_RUNNER = {"pytest": "pytest", "node": "node"}
 
 
 def validate_relpath(relpath: str, runner: str = "pytest") -> str:
-    """Return ``relpath`` if it is a safe POSIX path of a ``test_*.py`` file (runner "pytest") or
-    of a ``*.contract.toml`` file (runner "contract"), else ValueError."""
+    """Return ``relpath`` if it is a safe POSIX path of a ``test_*.py`` file (runner "pytest"), of a
+    ``*.test.js|mjs|ts|mts`` file (runner "node") or of a ``*.contract.toml`` file (runner
+    "contract"), else ValueError."""
     if runner not in RUNNERS:
-        raise ValueError("runner: must be 'pytest' or 'contract'")
+        raise ValueError("runner: must be 'pytest', 'node' or 'contract'")
     if not isinstance(relpath, str) or not relpath or "\\" in relpath or "\0" in relpath:
         raise ValueError("relpath: must be a non-empty POSIX path")
     if relpath.startswith("/") or PurePosixPath(relpath).is_absolute():
@@ -42,6 +50,10 @@ def validate_relpath(relpath: str, runner: str = "pytest") -> str:
     if runner == "contract":
         if not (name.endswith(CONTRACT_SUFFIX) and len(name) > len(CONTRACT_SUFFIX)):
             raise ValueError("relpath: file name must match *.contract.toml")
+        return relpath
+    if runner == "node":
+        if not any(name.endswith(sfx) and len(name) > len(sfx) for sfx in NODE_SUFFIXES):
+            raise ValueError("relpath: file name must match *.test.js, *.test.mjs, *.test.ts or *.test.mts")
         return relpath
     if not (name.startswith("test_") and name.endswith(".py") and len(name) > len("test_.py")):
         raise ValueError("relpath: file name must match test_*.py")
@@ -85,11 +97,16 @@ class DraftCheck:
         if self.visibility not in VISIBILITIES:
             raise ValueError("DraftCheck.visibility: must be 'visible' or 'hidden'")
         if self.runner not in RUNNERS:
-            raise ValueError("DraftCheck.runner: must be 'pytest' or 'contract'")
+            raise ValueError("DraftCheck.runner: must be 'pytest', 'node' or 'contract'")
         validate_relpath(self.relpath, self.runner)
         if self.runner == "pytest":
             if not isinstance(self.node, str) or not _NODE.fullmatch(self.node):
                 raise ValueError("DraftCheck.node: must be a test function name (test_...)")
+        elif self.runner == "node":
+            if not isinstance(self.node, str) or not _NODE_TEST_NAME.fullmatch(self.node) \
+                    or self.node.endswith(" ") or self.node in NODE_RESERVED_NAMES:
+                raise ValueError("DraftCheck.node: must be the name of a top-level node:test test "
+                                 "([A-Za-z0-9_][A-Za-z0-9_ .:-]*, not reserved)")
         elif not isinstance(self.node, str) or not _CONTRACT_NODE.fullmatch(self.node):
             raise ValueError("DraftCheck.node: must match [A-Za-z_][A-Za-z0-9_]{0,63}")
         if self.author_role not in VISIBILITIES:
@@ -117,9 +134,9 @@ class CheckSet:
 
 
 def checks_by_runner(checkset: "CheckSet", runner: str) -> tuple[DraftCheck, ...]:
-    """The checks of ``checkset`` that are executed by ``runner`` ("pytest" or "contract")."""
+    """The checks of ``checkset`` that are executed by ``runner`` ("pytest", "node" or "contract")."""
     if runner not in RUNNERS:
-        raise ValueError("runner: must be 'pytest' or 'contract'")
+        raise ValueError("runner: must be 'pytest', 'node' or 'contract'")
     return tuple(c for c in checkset.checks if c.runner == runner)
 
 

@@ -35,7 +35,7 @@ from ..config import RecoveryLimits
 from ..ledger import BudgetExceeded, Ledger
 from ..modelhost import sandbox_hook
 from ..oracle import checkstore
-from ..oracle.adapters.pytest_adapter import PytestAdapter
+from ..oracle.adapters import get_adapter
 from ..oracle.disputes import has_open_dispute, open_dispute
 from ..oracle.model import CheckSet
 from ..oracle.verify import render_feedback, run_baseline, verify
@@ -365,7 +365,7 @@ class _Run:
             raise TaskConfigError("every provider of a task must share one ledger and one gateway")
         self.labels = first.gateway.labels
         self.ledger: Ledger = first.ledger
-        self.adapter = PytestAdapter()
+        self.adapter = get_adapter(spec.checkset.adapter)
         self._baseline = None
         self._visible: dict[str, bytes] | None = None
 

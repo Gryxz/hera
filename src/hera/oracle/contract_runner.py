@@ -30,6 +30,7 @@ from ..workspace import _rm_tree, find_escaping_symlinks
 from .checkstore import CheckStoreTampered, verify_integrity
 from .contract import OWNED_DIRS, ContractCheck, evaluate, load_contract_file
 from .model import CheckSet, DraftCheck, checks_by_runner
+from .nodeenv import find_node, readable_paths
 
 FEEDBACK_OUTPUT_CHARS = 2_000
 FEEDBACK_TEXT_CAP = 5_000
@@ -94,8 +95,9 @@ def _limits(base: sandbox.Limits | None, timeout_s: float) -> sandbox.Limits:
 class ContractRunner:
     name = "contract"
 
-    def __init__(self, python: str | None = None) -> None:
+    def __init__(self, python: str | None = None, node: str | None = None) -> None:
         self.python = python or sys.executable        # the interpreter that replaces {python}
+        self.node = node                              # replaces {node}; None: $HERA_NODE, then PATH
 
     # ---- loading ---------------------------------------------------------------------
     def _load(self, checkset: CheckSet, drafts: list[DraftCheck]) -> dict[tuple[str, str], ContractCheck]:
@@ -153,10 +155,19 @@ class ContractRunner:
             real = os.path.realpath(run_dir)
             env = dict(cc.env)
             env["PYTHONPATH"] = os.pathsep.join([real, os.path.join(real, "src")])
-            argv = cc.resolved_argv(self.python)
             kw = {"stdin_data": cc.stdin.encode("utf-8")} if cc.stdin else {}
+            node = find_node(self.node) if cc.needs_node else None
+            if node is not None:                       # Node's install directory must be readable inside
+                kw["read_only"] = readable_paths(node)
+                env["NODE_OPTIONS"] = ""
+            argv = cc.resolved_argv(self.python, node)
             try:
-                rr = sandbox.run(argv, cwd=run_dir, limits=_limits(limits, cc.timeout_s), env=env,
+                if cc.needs_node and node is None:
+                    raise OSError("node executable not found for a {node} contract check")
+                lim = _limits(limits, cc.timeout_s)
+                if cc.needs_node:                      # V8 and Wasm reserve address space: no RLIMIT_AS
+                    lim = replace(lim, memory_mb=None)
+                rr = sandbox.run(argv, cwd=run_dir, limits=lim, env=env,
                                  allow_unsandboxed=allow_unsandboxed, **kw)
             except (OSError, ValueError) as e:        # program not found or not executable
                 rr = sandbox.RunResult(None, b"", f"{type(e).__name__}: {e}".encode("utf-8", "replace"),
