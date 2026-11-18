@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 1134 tests; 10 skip where no sandbox mechanism is available
+pytest -q                       # 1159 tests; 10 skip where no sandbox mechanism is available
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -104,7 +104,7 @@ Around that loop:
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
 | `src/hera/cli.py` | `hera init`, `hera status`, `hera verify`, `hera providers list`, `hera providers check <name>`, `hera summary import/show/approve/reject/list`, `hera checks freeze`, `hera run`, `hera task status`, `hera task continue`, `hera dispute list`, `hera dispute resolve`, `hera report`, `hera host status/start/stop/reset` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks, an invented toy project (`toyrepo.py`) and a fake model server (`fake_model_server.py`) | 1134 (10 need a sandbox mechanism) |
+| `tests/` | One test file per module, plus portability checks, an invented toy project (`toyrepo.py`) and a fake model server (`fake_model_server.py`) | 1159 (10 need a sandbox mechanism) |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
 Not built yet: the real local model worker and its Mac memory measurement (S5; the supervisor, S5b, is built), check authoring by models (and a model that drafts the requirements summary), a path for remote models to help on personal or proprietary repositories through approved sanitised descriptions.

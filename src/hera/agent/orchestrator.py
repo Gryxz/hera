@@ -23,9 +23,11 @@ import dataclasses
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Mapping
 
 from .. import sandbox
@@ -71,6 +73,10 @@ class TaskConfigError(ValueError):
     """The providers or the task cannot be used at all (a configuration problem, not a verdict)."""
 
 
+class TaskBusy(TaskConfigError):
+    """Another process is already running or continuing this task; nothing was logged or sent."""
+
+
 class ContinueRefused(Exception):
     """``continue_task`` will not continue the task now. Nothing was logged and nothing was sent."""
 
@@ -101,16 +107,66 @@ class TaskOutcome:
     events: tuple = ()
 
 
+# ---- one runner per task ------------------------------------------------------------------------------
+@contextlib.contextmanager
+def _task_lock(conn: sqlite3.Connection, task_id: str):
+    """Refuse a second concurrent run of the same task (TaskBusy) instead of letting two processes
+    interleave events and spend twice.
+
+    An advisory ``flock`` on a file next to the state database: the operating system drops it when the
+    process dies, so a crashed run leaves nothing to clean up and resuming works at once. Nothing is
+    locked for an in-memory database (one connection, one process) or where ``fcntl`` is missing; the
+    event append is atomic either way, so this is a guard against waste and confusion, not what keeps
+    the log consistent. The file name is a hash of the task id (no path characters, and case-insensitive
+    file systems cannot merge two task ids)."""
+    try:
+        import fcntl
+        db_file = next((r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main"), "")
+    except ImportError:
+        fcntl, db_file = None, ""
+    if not db_file or fcntl is None:
+        yield
+        return
+    lock_dir = Path(db_file).parent / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_dir / (hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:32] + ".lock"),
+                 os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise TaskBusy("this task is already being run by another process") from None
+        yield
+    finally:
+        os.close(fd)                                    # closing the descriptor releases the lock
+
+
 # ---- the event log ---------------------------------------------------------------------------------
 def _append(conn: sqlite3.Connection, task_id: str, kind: str, detail: dict) -> dict:
-    """Append one event with the next sequence number (one statement, so it cannot interleave)."""
+    """Append one event with the next sequence number and return it, atomically.
+
+    The next number is computed and the row inserted by one ``INSERT ... SELECT`` inside a write
+    transaction (``BEGIN IMMEDIATE`` takes the write lock first, so a second writer waits for the
+    busy timeout instead of reading the same MAX), and the number is read back from the row just
+    inserted (``last_insert_rowid``), not from "the highest seq", which another writer could have
+    moved. ``PRIMARY KEY(task_id, seq)`` is the backstop: a collision raises instead of interleaving.
+    Inside a caller's open transaction (``file_dispute``) the caller's lock is used."""
     now = time.time()
-    conn.execute("INSERT INTO task_events(task_id, seq, at, kind, detail_json) "
-                 "SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM task_events WHERE task_id=?",
-                 (task_id, now, kind, json.dumps(detail, sort_keys=True, ensure_ascii=False), task_id))
-    row = conn.execute("SELECT seq FROM task_events WHERE task_id=? ORDER BY seq DESC LIMIT 1",
-                       (task_id,)).fetchone()
-    return {"seq": row["seq"], "at": now, "kind": kind, "detail": detail}
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("INSERT INTO task_events(task_id, seq, at, kind, detail_json) "
+                     "SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM task_events WHERE task_id=?",
+                     (task_id, now, kind, json.dumps(detail, sort_keys=True, ensure_ascii=False), task_id))
+        seq = conn.execute("SELECT seq FROM task_events WHERE rowid = last_insert_rowid()").fetchone()["seq"]
+        if own:
+            conn.execute("COMMIT")
+    except BaseException:
+        if own and conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    return {"seq": seq, "at": now, "kind": kind, "detail": detail}
 
 
 def load_events(conn: sqlite3.Connection, task_id: str) -> list[dict]:
@@ -730,7 +786,7 @@ def run_task(conn: sqlite3.Connection, task: TaskSpec, *, providers: Mapping[str
     called with every event as it is logged. A task that has already stopped is returned as stored,
     without any call; start a new task id to run again. Every local model host attached to a provider
     is evicted before each sandbox job of the run (verification and the agent's commands)."""
-    with _hosts_evicted_before_sandbox_jobs(providers):
+    with _task_lock(conn, task.task_id), _hosts_evicted_before_sandbox_jobs(providers):
         return _Run(conn, task, providers, policy, on_event).run()
 
 
@@ -751,5 +807,5 @@ def continue_task(conn: sqlite3.Connection, task_id: str, *, spec: TaskSpec, pro
     replaced by the one the log names after an amendment)."""
     if spec.task_id != task_id:
         raise TaskConfigError("the spec belongs to a different task")
-    with _hosts_evicted_before_sandbox_jobs(providers):
+    with _task_lock(conn, task_id), _hosts_evicted_before_sandbox_jobs(providers):
         return _Run(conn, spec, providers, policy, on_event).continue_(max_usd)
