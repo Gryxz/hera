@@ -7,6 +7,7 @@ lives in the Destination's headers, never here.
 from __future__ import annotations
 import json
 from typing import Sequence
+from ..modelhost import HostError
 from ..types import ModelReply, ToolCall, Usage
 from .base import BaseProvider, Message, ProviderError, args_text, make_tool_call
 
@@ -14,10 +15,47 @@ _ALLOWED = ("temperature", "top_p", "stop", "tool_choice", "chat_template_kwargs
             "reasoning_effort", "max_completion_tokens")
 
 
+def estimate_prompt_tokens(body: bytes) -> int:
+    """Prompt size in tokens, estimated as request bytes / 3 (code and JSON run near 3 bytes per
+    token; over-counting is the safe side when the question is whether a prompt fits)."""
+    return -(-len(body) // 3)
+
+
 class OpenAICompatProvider(BaseProvider):
-    def __init__(self, *args, send_store_false: bool = False, **kw) -> None:
+    def __init__(self, *args, send_store_false: bool = False, host=None, **kw) -> None:
         super().__init__(*args, **kw)
         self.send_store_false = send_store_false
+        # a supervised local model host (hera.modelhost.ModelHost); only for the "local" tier
+        self.host = host
+        if host is not None and self.tier != "local":
+            raise ValueError("a model host can only be attached to a provider of tier 'local'")
+
+    def complete(self, messages: Sequence[Message], *, max_tokens: int, task_id: str | None = None,
+                 purpose: str = "implement", tools: Sequence = (), **options) -> ModelReply:
+        """Without a host this is the shared flow. With one: take the lease (one local generation at
+        a time), refuse a prompt that would not fit the context cap (nothing is sent, nothing is
+        recorded; the prompt estimate plus max_tokens is what must fit), turn thinking off unless the caller chose, and report any host failure as
+        ProviderError so the orchestrator's normal provider-error handling applies."""
+        if self.host is None:
+            return super().complete(messages, max_tokens=max_tokens, task_id=task_id, purpose=purpose,
+                                    tools=tools, **options)
+        if options.get("chat_template_kwargs") is None:
+            options["chat_template_kwargs"] = {"enable_thinking": self.host.settings.enable_thinking}
+        messages = list(messages)
+        self._validate(messages)
+        # the context holds the prompt AND the reply, so both count against the cap
+        estimate = estimate_prompt_tokens(self._build(messages, max_tokens, tools, options)) + max_tokens
+        if estimate > self.host.settings.max_context_tokens:      # cannot fit at any memory level
+            raise ProviderError("the prompt plus max_tokens is larger than the local model's context limit")
+        try:
+            with self.host.lease() as lease:
+                if estimate > lease.context_cap:
+                    raise ProviderError("the prompt plus max_tokens does not fit the local model's context cap "
+                                        f"({lease.context_cap} tokens)")
+                return super().complete(messages, max_tokens=max_tokens, task_id=task_id,
+                                        purpose=purpose, tools=tools, **options)
+        except HostError as e:
+            raise ProviderError(f"the local model host is not available: {e}") from None
 
     def _build(self, messages: Sequence[Message], max_tokens: int, tools: Sequence,
                options: dict) -> bytes:

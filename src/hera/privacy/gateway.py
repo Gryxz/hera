@@ -57,6 +57,9 @@ class SendResult:
     reason: str = ""
     status: int | None = None
     body: bytes = b""
+    # the gateway allowed the send but no response came back (connection refused, timeout, reset):
+    # not a privacy decision, and the request may have reached the destination
+    transport_error: bool = False
 
 
 class _Blocked(Exception):
@@ -235,4 +238,4 @@ class Gateway:
         except urllib.error.HTTPError as e:
             return SendResult(sent=True, status=e.code, body=e.read())
         except Exception as e:
-            return SendResult(sent=False, reason=f"transport error: {type(e).__name__}")
+            return SendResult(sent=False, reason=f"transport error: {type(e).__name__}", transport_error=True)

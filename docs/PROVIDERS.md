@@ -44,10 +44,14 @@ supported. Do not use thread, session or conversation-id features of any endpoin
 ## Call flow and budget
 
 `complete` builds the body, verifies it contains exactly the inspected segment text, estimates
-the cost (input at 4 bytes per token plus `max_tokens` of output), asks the ledger to check caps
-(a capped call raises `BudgetExceeded` and nothing is sent), sends through the gateway, then records
-the real usage. A refusal raises `ProviderBlocked`; an HTTP error or unparseable reply raises
-`ProviderError` (an unparseable reply also leaves a zero-usage `:unparsed` ledger row). If a reply
+the cost (input at 3 bytes per token, which over-counts on purpose, plus `max_tokens` of output), asks
+the ledger to check caps (a capped call raises `BudgetExceeded` and nothing is sent), sends through
+the gateway, then records the real usage. A privacy refusal raises `ProviderBlocked`. An HTTP error,
+an unparseable reply, or a transport failure (connection refused, timeout, reset: the gateway allowed
+the send but no response came back) raises `ProviderError`, so the recovery ladder treats it as a
+provider failure and never as a privacy block. After a transport failure the request may still have
+reached the provider and been billed; nothing is recorded for it (known gap). An unparseable reply
+leaves a zero-usage `:unparsed` ledger row. If a reply
 carries no usage, `reply.usage_reported` is `False` and zero is recorded, so check that flag.
 
 ## Rules enforced in code
@@ -59,3 +63,13 @@ carries no usage, `reply.usage_reported` is `False` and zero is recorded, so che
 ## Grok (xAI)
 
 `GrokProvider` uses xAI's OpenAI-compatible, stateless chat-completions endpoint: URL `https://api.x.ai/v1/chat/completions`, header `Authorization: Bearer <key>`. Differences from the generic adapter: it always sends `max_completion_tokens`, drops `stop`, and counts reasoning tokens as output so reasoning is never billed as free. Like every remote provider it is a remote destination: only public or explicitly approved content may be sent, and xAI's data-retention terms have not been reviewed for this project. Tested against a mock server only.
+
+## A supervised local model host
+
+With `[local_model].command` set (see [MODELHOST.md](MODELHOST.md)), every provider of tier `local`, kind
+`openai_compat` and URL exactly `http://127.0.0.1:<[local_model].port>` carries a `ModelHost`
+(`provider.host`). Its `complete()` then takes a lease around the call (one local generation at a time),
+refuses a prompt whose estimated tokens (request bytes / 3) exceed the lease's context cap before anything is
+sent or recorded, sends `chat_template_kwargs: {"enable_thinking": false}` unless the caller passed its own,
+and reports `HostUnavailable`, `HostStartError` and `HostBusy` as `ProviderError`. A local provider on that
+port without a command is unchanged; a command with no such provider is shown by `hera providers list`.

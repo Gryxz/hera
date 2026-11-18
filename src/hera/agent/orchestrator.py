@@ -18,6 +18,7 @@ and the gateway.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -27,8 +28,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
+from .. import sandbox
 from ..config import RecoveryLimits
 from ..ledger import BudgetExceeded, Ledger
+from ..modelhost import sandbox_hook
 from ..oracle import checkstore
 from ..oracle.adapters.pytest_adapter import PytestAdapter
 from ..oracle.disputes import has_open_dispute, open_dispute
@@ -706,13 +709,27 @@ class _Run:
                            usd=self.ledger.spent_task(self.spec.task_id), events=tuple(events))
 
 
+def _hosts_evicted_before_sandbox_jobs(providers: Mapping[str, BaseProvider]):
+    """While a task runs, every local model host attached to one of its providers is evicted before
+    each sandbox job (strict alternation of model and sandbox)."""
+    hosts, seen = [], set()
+    for p in providers.values():
+        h = getattr(p, "host", None)
+        if h is not None and id(h) not in seen:
+            seen.add(id(h))
+            hosts.append(h)
+    return sandbox.before_each_job(sandbox_hook(hosts)) if hosts else contextlib.nullcontext()
+
+
 def run_task(conn: sqlite3.Connection, task: TaskSpec, *, providers: Mapping[str, BaseProvider],
              policy: Policy, on_event: Callable[[dict], None] | None = None) -> TaskOutcome:
     """Run (or resume) ``task`` until it ends. ``providers`` maps a role to a provider: ``default``,
     optionally ``default_alt``, ``strong`` and ``local`` (see ``select_roles``). ``on_event`` is
     called with every event as it is logged. A task that has already stopped is returned as stored,
-    without any call; start a new task id to run again."""
-    return _Run(conn, task, providers, policy, on_event).run()
+    without any call; start a new task id to run again. Every local model host attached to a provider
+    is evicted before each sandbox job of the run (verification and the agent's commands)."""
+    with _hosts_evicted_before_sandbox_jobs(providers):
+        return _Run(conn, task, providers, policy, on_event).run()
 
 
 def continue_task(conn: sqlite3.Connection, task_id: str, *, spec: TaskSpec, providers: Mapping[str, BaseProvider],
@@ -732,4 +749,5 @@ def continue_task(conn: sqlite3.Connection, task_id: str, *, spec: TaskSpec, pro
     replaced by the one the log names after an amendment)."""
     if spec.task_id != task_id:
         raise TaskConfigError("the spec belongs to a different task")
-    return _Run(conn, spec, providers, policy, on_event).continue_(max_usd)
+    with _hosts_evicted_before_sandbox_jobs(providers):
+        return _Run(conn, spec, providers, policy, on_event).continue_(max_usd)

@@ -19,6 +19,7 @@ library; the network is cut off by the mechanism, not by this code.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
@@ -332,6 +333,32 @@ def _kill_group(pid: int) -> None:
         pass
 
 
+_JOB_HOOKS: list = []
+
+
+@contextlib.contextmanager
+def before_each_job(hook):
+    """Call ``hook()`` before every sandbox job started while the block runs (the local model host
+    uses it to leave memory free: see docs/MODELHOST.md). A hook that raises is ignored: it can
+    never stop or fail a job."""
+    _JOB_HOOKS.append(hook)
+    try:
+        yield
+    finally:
+        try:
+            _JOB_HOOKS.remove(hook)
+        except ValueError:
+            pass
+
+
+def _run_job_hooks() -> None:
+    for hook in list(_JOB_HOOKS):
+        try:
+            hook()
+        except Exception:
+            pass
+
+
 def run(argv: Sequence[str], *, cwd, limits: Limits = Limits(), read_only: Sequence = (),
         writable: Sequence = (), env: Mapping[str, str] | None = None,
         mechanism: str | None = None, allow_unsandboxed: bool = False,
@@ -374,6 +401,7 @@ def run(argv: Sequence[str], *, cwd, limits: Limits = Limits(), read_only: Seque
         if not os.path.exists(p):
             raise ValueError(f"path does not exist: {p}")
 
+    _run_job_hooks()
     tmp = _real(tempfile.mkdtemp(prefix="hera-sbx-"))
     try:
         child_env = _scrubbed_env(tmp, env)

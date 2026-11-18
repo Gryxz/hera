@@ -130,8 +130,11 @@ def load(path: Path) -> Config:
     tiers = {name: TierPrice(**vals) for name, vals in prices.get("tiers", {}).items()}
     if "local" not in tiers:
         tiers["local"] = TierPrice(0.0, 0.0)
+    local_model = raw.get("local_model", {})
+    from .modelhost import HostSettings          # the one parser: a bad table fails here, at load time
+    HostSettings.from_table(local_model)
     return Config(budget=Budget(**raw.get("budget", {})), prices=tiers,
                   prices_as_of=prices.get("as_of", ""), models=raw.get("models", {}),
-                  local_model=raw.get("local_model", {}),
+                  local_model=local_model,
                   providers={n: _provider_spec(n, v) for n, v in raw.get("providers", {}).items()},
                   recovery=_recovery(raw.get("recovery", {})))

@@ -292,12 +292,16 @@ def test_non_json_200_records_unparsed(env, mock):
     assert row["task_id"] == "t2"
 
 
-def test_transport_failure_is_blocked_error(conn, mock):
+def test_transport_failure_is_a_provider_error_not_a_privacy_block(conn, mock):
+    # a timeout or refused connection must reach the ladder as a provider error (continuable), not as
+    # a privacy refusal (which would move the task to local-only or stop it as BLOCKED_PRIVACY)
     e = Env(conn, mock)
     mock.close()
-    with pytest.raises(ProviderBlocked) as ei:
+    with pytest.raises(ProviderError, match="could not be reached") as ei:
         e.openai().complete([e.msg("user", "u", "q")], max_tokens=10)
-    assert ei.value.reason.startswith("transport error")
+    assert not isinstance(ei.value, ProviderBlocked) and ei.value.status is None
+    (row,) = conn.execute("SELECT decision FROM transmissions").fetchall()
+    assert row["decision"] == "sent"                  # the log says it was allowed out (it may have arrived)
 
 
 # -- local tier --------------------------------------------------------------------------------
