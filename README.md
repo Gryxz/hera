@@ -10,7 +10,7 @@ Private project for a group of four. Each member runs their own copy.
 
 ## If you are picking this up
 
-1. Read this page, then `docs/BUILD_PLAN.md`.
+1. Read [HANDOVER.md](HANDOVER.md) (what is left, in priority order), this page, then `docs/BUILD_PLAN.md`.
 2. Run the setup below and make sure the tests pass on your machine.
 3. Take the first step in the plan whose status is not "Done". Each step has a **"done when"** line — that is the definition of finished.
 4. Work on a branch, open a pull request, keep CI green.
