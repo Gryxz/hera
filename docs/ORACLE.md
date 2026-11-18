@@ -87,8 +87,18 @@ pytest's final summary line equal the counts parsed from the JUnit file. The JUn
 missing, over 5 MB, containing NUL bytes, a DOCTYPE or an ENTITY, or not parseable; the report then has
 no results and both flags false. Parametrized checks pass only if every case passes.
 
-Known limit of the summary check: a teardown error after a passing call is counted differently by
-pytest and in the XML and would read as inconsistent.
+Teardown errors. When a fixture raises in teardown after the test body passed, pytest writes ONE
+`<testcase>` holding only an `<error message="failed on teardown ...">`, while its summary line counts
+the body as passed and the teardown as an error ("1 passed, 1 error"). Reading that testcase as one
+failure used to make the counts disagree, which read as TAMPER. The adapter now splits such a testcase
+into the body's pass plus the error (`_outcomes`), so JUnit, summary line and exit code agree. The check's
+status is then `ERROR` (an error outranks a pass; a failing body stays `FAIL` and its text keeps the
+teardown text too; a skipped body with a teardown error is `ERROR`). `ERROR` is the conservative choice:
+the check did not run cleanly, so it is not counted as passed. Only a testcase whose every outcome element
+is a teardown error, with no other testcase of the same name, is split; a failing or skipped body already
+counts once. The split applies to the project-test run as well. It does not loosen the cross-check: a
+forged teardown-style error that replaces a failure adds a pass the summary line does not have, and is
+still inconsistent.
 
 ## Feedback redaction
 
@@ -450,7 +460,7 @@ written into the routing event.
 ## Not yet built
 
 Two blind check
-authors, persisting validation results into `checks.health`, stub adversaries
+authors, stub adversaries
 and mutation testing (TODO, milestone 0.2), model-written checks (needs a real provider call),
 per-language environments (checks run with the same Python interpreter that runs HERA; building an
 environment from the project's lockfile is later), a TypeScript adapter, a per-test timeout (a hang
