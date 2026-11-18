@@ -1,4 +1,4 @@
-# Acceptance oracle (S7a: checks, frozen store, pytest adapter, validation; S7b: audit, verify, verdicts, disputes; S7c: contract checks; S7d: requirements summary)
+# Acceptance oracle (S7a: checks, frozen store, pytest adapter, node adapter, validation; S7b: audit, verify, verdicts, disputes; S7c: contract checks; S7d: requirements summary)
 
 Code: `src/hera/oracle/model.py`, `checkstore.py`, `adapters/pytest_adapter.py`, `validation.py`
 (S7a); `audit.py`, `verify.py`, `disputes.py` (S7b); `contract.py`, `contract_runner.py` (S7c);
@@ -154,6 +154,7 @@ BLOCK findings go to `Receipt.audit_block_hits` (verdict TAMPER); flags go to `a
 | `protected_path_modified` | BLOCK | a path matching `adapter.is_protected` existed at base and its content differs at the commit (mode-only changes are ignored), unless matched by `allowed_protected` |
 | `protected_path_deleted` | BLOCK | a protected base path is deleted, unless allowed |
 | `protected_path_added` | BLOCK | a candidate-ADDED `conftest.py`, `sitecustomize.py` or `usercustomize.py` (any depth), top-level `pytest.ini`, `tox.ini`, `setup.cfg`, top-level `pytest_*.py`, or anything under `_hera_checks/` or `_hera_results/`. `allowed_protected` does NOT apply |
+| `runner_control_changed` | BLOCK | with an adapter that names runner-control files (node): a candidate-added or changed `.noderc`, `.npmrc`, `node.config.json` (any depth), or a `package.json` that sets `node_options` / `nodeOptions`. `allowed_protected` does NOT apply |
 | `prepare_restored` / `prepare_deleted` | BLOCK | `prepare` restored or deleted a path that no diff rule reported (allowed paths excluded for restores) |
 | `test_file_added` | flag | another added file under a protected pattern (a new test file) |
 | `skip_marker_added` | flag | added lines in a `.py` file containing `pytest.mark.skip` (also `skipif`), `pytest.mark.xfail`, `pytest.skip(`, `unittest.skip` or `@skip` |
@@ -245,7 +246,10 @@ files_contain = { "log.txt" = ["started"] }
 
 - `{python}` is replaced by the interpreter the oracle chose (`sys.executable` for now) in every argv
   element that is exactly `{python}`. There are no other placeholders (a `{python}` inside a longer
-  string is left alone). `argv[0]` otherwise must be a bare program name (resolved on the sandbox `PATH`)
+  string is left alone). `{node}` works the same way for JavaScript candidates: it is the resolved Node
+  executable (`$HERA_NODE`, else `node` on PATH), whose install directory is added to the sandbox's
+  read-only paths and which runs without an address-space limit (V8 reserves too much for one). Any
+  other `argv[0]` must be a bare program name (resolved on the sandbox `PATH`)
   or a relative path inside the checkout; absolute paths, `..` segments and a leading `-` are rejected at
   load time.
 - `env` keys match `[A-Z_][A-Z0-9_]*` and may not be `PATH`, `HOME`, `TMPDIR`, `PYTHONPATH`,
@@ -320,6 +324,116 @@ STILL OPEN:
   and had not been run by their author when this was written; CI is their first run. The verifier must not use `none` for real runs.
 - A straggler that escaped the process group can hold the output pipes open; `sandbox.run` now stops
   waiting for the readers after five seconds in total instead of blocking until the straggler exits.
+
+## Node adapter (`adapters/node_adapter.py`)
+
+The second reference adapter. A check set with `adapter = "node"` is run by Node's built-in test
+runner (`node --test`); `get_adapter(checkset.adapter)` chooses it in `verify`, `hera verify`,
+`hera checks freeze` and the orchestrator. In a SPEC.toml, a top-level `adapter = "node"` selects it
+(default `"pytest"`) and is the default `runner` of every check that names none.
+
+### What it runs
+
+- Check files `*.test.js`, `*.test.mjs`, and `*.test.ts`, `*.test.mts` through Node's type stripping.
+  Types are erased, not checked. Node 22.6 or newer is required; the adapter probes the Node it finds
+  (`$HERA_NODE`, else `node` on PATH) once, with a one-line TypeScript file, and refuses with
+  `NodeUnavailable` and a clear message if Node is missing, older than 22.6, or cannot strip types while
+  the check set has a `.ts` or `.mts` file. `--experimental-strip-types` is passed when needed.
+- One check is one top-level `test()` or `describe()` of a check file (`DraftCheck.node` is its name,
+  `[A-Za-z0-9_][A-Za-z0-9_ .:-]*`, unique within the file, never `hera_must_pass` or `hera_must_fail`).
+  Subtests and nested suites belong to it and ALL must pass; a skipped or todo test is `SKIP`, which is
+  not a pass. A failure that loads the whole file (a syntax error, a missing module or export, a crash)
+  is `ERROR` for every check of that file that reported nothing itself. That is what makes a new check on
+  the base commit VALID with rule `missing_feature` (`ERR_MODULE_NOT_FOUND`, "does not provide an export
+  named", ...), as `ImportError` does for pytest.
+- No npm package is needed, so there is no network or install step. There is also no jest or vitest
+  support yet (see Limits).
+- Layout: a check file `x.test.js` is written to `_hera_checks/<visible|hidden>/x.test.js`, so it
+  reaches candidate code relative to that place (`../../calc.js` from a file at the top of the set). The
+  oracle writes a `_hera_checks/package.json` with `{"type": "module"}`, so check files are ES modules
+  whatever the candidate's own `package.json` says. Candidate modules follow their own `package.json`.
+- Each check file, and the sentinel file, runs in its own `node --test` process under `sandbox.run`:
+  `node --no-warnings --test --test-force-exit --test-reporter=junit
+  --test-reporter-destination=_hera_results/junit.xml --test-reporter=tap
+  --test-reporter-destination=stdout <file>` with the explicit file path (nothing is discovered). Each
+  file is written from the frozen store (hash-checked) right before its own process starts and removed
+  after it, and `_hera_results` is recreated empty for every run. So a candidate imported by one check
+  cannot alter, plant or read the files of later runs, and a hidden file exists in the checkout only
+  while it is being run. The wall limit is one budget for all the runs of the call; files that did not
+  start before it ran out are `TIMEOUT`.
+- The sandbox gets the Node install directory (two levels above the resolved executable,
+  `<prefix>/bin/node`) as a readable path, so it works when Node lives under `/Users` on macOS CI. It is
+  skipped when it is the root or, on Linux, already inside the `/usr` system bind. Node runs without an
+  address-space limit (`memory_mb=None`): type stripping uses WebAssembly, which reserves more address
+  space than any `RLIMIT_AS` worth setting.
+- The project's own pre-existing tests (regression baseline) are the `*.test.js|mjs|ts|mts` files of the
+  base tree, run one process per file with the same two reporters; test ids are
+  `<file>::<suite> > <test>`.
+
+### Protections (same shape as the pytest adapter)
+
+`prepare`: wipes `_hera_checks` and `_hera_results`; restores every protected base path and deletes
+protected files the candidate added (`.noderc`, `.npmrc`, `node.config.json`, `test/**`, `tests/**`,
+`__tests__/**`, `.github/**`, and `*.test.*`, `*.spec.*`, `*-test.*`, `*_test.*`, `test-*.*`, `test.*` for
+`js mjs cjs ts mts cts`, case-insensitively); and removes `node_options` / `nodeOptions` keys from every
+`package.json` (the file as a whole is not protected: a candidate may change dependencies or the module
+type). Each of these is reported in `PrepareReport`, and the audit turns the control files and the
+`node_options` setting into BLOCK findings (`runner_control_changed`), so TAMPER. The environment is
+scrubbed by `sandbox.run`; `NODE_OPTIONS` and `NODE_PATH` are set empty explicitly. Only oracle-owned
+check files, passed explicitly, are run. The sentinel pair (`hera_must_pass` must pass, `hera_must_fail`
+must fail, in a file that imports nothing from the project) must behave exactly. Every run has a wall
+timeout. Feedback is as for pytest: a failing visible check gives id, requirement ids and failure text
+(2,000 characters), a failing hidden check gives requirement ids only.
+
+### Result integrity: two reporters
+
+junit (to a file) is the preferred machine-readable output and carries names, durations and failure text.
+It has two weaknesses: Node drops the failure of a test that fails AFTER its subtests passed, and the
+file is inside the checkout, where the candidate's process can reach it. The TAP stream on stdout is
+written by the parent runner process, and everything a candidate prints reaches it escaped and prefixed
+with `# `, so it cannot pose as a result line (a test checks this). The adapter reads both and:
+
+- takes the worse of the two results for every top-level check;
+- declares `exit_code_consistent` only if the exit code is 1 exactly when the TAP summary has failures or
+  cancellations; those counts agree with the top-level lines; the junit and TAP top-level entries have the
+  same names; no junit entry says fail where TAP says pass; and for a plain test (not a suite) junit and
+  TAP agree;
+- treats a file that exits early (`process.exit(0)` in candidate code) as having no results: Node reports
+  the file as passing and no tests, the checks are absent, and S7b reads absent checks as tampering;
+- refuses an unreadable, oversized, NUL-containing or DOCTYPE/ENTITY junit file as pytest does, and
+  truncated or summary-less TAP.
+
+Two top-level tests that share a name in one check file make that check `ERROR`.
+
+### The known gap, stated plainly
+
+As with pytest, candidate code imported by a native `node --test` check runs inside the node:test
+process. It can patch `node:assert` (the shared functions become no-ops), `node:test` internals,
+`process.exit` or what reaches the reporter, and report anything it likes for that file's tests. The
+sentinel pair runs in its own process which imports no candidate code, so it stays honest, and the exit
+code and the junit/TAP comparison are consistent with a forged run. Tested and NOT caught:
+`test_KNOWN_GAP_in_process_patching_yields_false_pass` (a lazy candidate with an assert-neutralising
+module gets PASS) and the adapter-level `test_KNOWN_GAP_in_process_patching_is_not_detected`. They assert
+the wrong answer on purpose and must keep passing until node checks move out of process. The robust route
+is the same as for pytest: hidden **contract checks** with `{node}`, which run the candidate as a separate
+process and compare in the oracle. `test_in_process_forgery_is_caught_by_a_hidden_contract_check` shows
+the forging JavaScript candidate OVERFIT when the set has one, and `in_process_only` lists what still
+rests on node:test only. Smaller differences from pytest: a hidden check file is on disk only during its
+own process, but the candidate code imported by that very file can read it.
+
+### Limits
+
+- Needs Node 22.6+ with type stripping for `.ts`/`.mts`; nothing older is attempted.
+- No npm dependencies: a project whose tests need a package from `node_modules` is not supported (the
+  adapter does not install anything, and the sandbox has no network). No jest, vitest or mocha adapter
+  yet; they would be separate adapters behind the same interface.
+- Only `.test.js`, `.test.mjs`, `.test.ts` and `.test.mts` are checks or project tests (not `.cjs`,
+  `.cts` or other naming patterns). Check `.js` files are ES modules.
+- The diff audit's skip-marker and debris rules read `.py` files only, so `test.skip(` or `console.log`
+  added to JavaScript is not flagged (restoration of protected tests still applies).
+- Type stripping is not type checking; Node's experimental features may change.
+- The sandbox-dependent runs (bwrap on Ubuntu, sandbox-exec on macOS) had not been run by the author
+  when this was written; CI is their first run.
 
 ## Residual risk, stated plainly
 
@@ -452,9 +566,9 @@ written into the routing event.
 Two blind check
 authors, persisting validation results into `checks.health`, stub adversaries
 and mutation testing (TODO, milestone 0.2), model-written checks (needs a real provider call),
-per-language environments (checks run with the same Python interpreter that runs HERA; building an
-environment from the project's lockfile is later), a TypeScript adapter, a per-test timeout (a hang
-loses every result of that run).
+per-language environments (pytest checks run with the same Python interpreter that runs HERA; building
+an environment from the project's lockfile is later), jest and vitest adapters (the node adapter covers
+`node:test` only), a per-test timeout (a hang loses every result of that run; for node, of that file).
 
 ## Verification without a sandbox
 

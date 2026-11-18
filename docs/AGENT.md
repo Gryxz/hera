@@ -297,11 +297,15 @@ as conclusions.
    id = "chk-r1-basic"
    requirements = ["R-1"]
    visibility = "visible"          # visible | hidden
-   file = "test_parse_amount.py"   # relative to the spec file; a test_*.py or *.contract.toml file
+   file = "test_parse_amount.py"   # relative to the spec file; a test_*.py, *.test.js|mjs|ts|mts (adapter "node") or *.contract.toml file
    node = "test_basic_amount"
    kind = "new"                    # new | regression (default new)
-   runner = "pytest"               # pytest | contract (default pytest)
+   runner = "pytest"               # pytest | node | contract (default: the spec's adapter runner)
    ```
+
+   A top-level `adapter = "node"` (default `"pytest"`) in the spec selects the node adapter (JavaScript and
+   TypeScript checks on `node:test`, see "Node adapter" in [ORACLE.md](ORACLE.md)); `hera verify` and
+   `hera run` pick the adapter from the check set.
 
 2. Write a `SUMMARY.toml` (format in [ORACLE.md](ORACLE.md)) whose requirements equal the spec's, then
    `hera summary import SUMMARY.toml`, read the screen, and `hera summary approve HASH --by human:<name>

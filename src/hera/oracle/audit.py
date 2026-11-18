@@ -96,6 +96,18 @@ def audit(repo: TaskRepo, base: str, commit: str, adapter, *, prepare_report=Non
             elif base_content.get(path) != commit_content.get(path):
                 block.append(Finding("protected_path_modified", path, "a protected file differs from its base content"))
 
+    # ---- files the adapter itself says steer its runner (the pytest names above are built in) ----
+    ctl = getattr(adapter, "controls_runner", None)
+    if ctl is not None:
+        names = tuple(getattr(adapter, "control_content_names", ()))
+        changed = {p for p, st in status.items() if st in ("A", "M", "T")}
+        blobs = repo.read_tree(commit, lambda p: p in changed and _base(p).casefold() in names) if names else {}
+        blocked = {f.path for f in block}
+        for path in sorted(changed - blocked):
+            if ctl(path, blobs.get(path)):
+                block.append(Finding("runner_control_changed", path,
+                                     "a file or setting that controls the test runner was added or changed"))
+
     # ---- added lines: skip markers, debugger and print calls ----------------------
     added = repo.diff_added_lines(base, commit)
     for path in sorted(added):

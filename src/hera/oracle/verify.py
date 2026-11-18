@@ -23,7 +23,7 @@ from .. import sandbox
 from ..types import Attribution, CheckHealth, CheckResult, CheckStatus, Receipt, Verdict
 from ..workspace import TaskRepo, _check_hash
 from . import checkstore
-from .adapters.pytest_adapter import PytestAdapter
+from .adapters import get_adapter
 from .audit import AuditReport, Finding, audit
 from .contract_runner import ContractRunner
 from .disputes import has_open_dispute
@@ -317,7 +317,7 @@ def verify(conn: sqlite3.Connection, repo: TaskRepo, checkset: CheckSet, commit:
     ``baseline`` is the project's own tests on the base commit (``run_baseline``); when None it
     is computed here. ``allowed_protected`` globs exempt paths from the protected-path BLOCK
     rules in the audit, but the verification checkout still restores them to base content."""
-    adapter = adapter if adapter is not None else PytestAdapter()
+    adapter = adapter if adapter is not None else get_adapter(checkset.adapter)
     if checkset.adapter != adapter.name:
         raise ValueError("the check set was frozen for a different adapter")
     if checkset.task_id != repo.task_id:
@@ -335,7 +335,8 @@ def verify(conn: sqlite3.Connection, repo: TaskRepo, checkset: CheckSet, commit:
         baseline = run_baseline(repo, adapter, allow_unsandboxed=allow_unsandboxed, limits=limits)
 
     included = [c for c in checkset.checks if include_hidden or c.visibility == "visible"]
-    has_pytest = any(c.runner == "pytest" for c in included)
+    native = getattr(adapter, "runner", "pytest")            # runner of the adapter's own checks
+    has_native = any(c.runner == native for c in included)
     has_contract = any(c.runner == "contract" for c in included)
     contract = None
     checkouts = []
@@ -344,7 +345,7 @@ def verify(conn: sqlite3.Connection, repo: TaskRepo, checkset: CheckSet, commit:
         co = repo.verification_checkout(commit)
         checkouts.append(co)
         prep = adapter.prepare(co, checkset, base_tree=base_tree, include_hidden=include_hidden)
-        if has_pytest:
+        if has_native:
             run = adapter.run(co, checkset, include_hidden=include_hidden, limits=limits,
                               allow_unsandboxed=allow_unsandboxed)
         else:                                  # nothing in-process to run: no sentinels to fail

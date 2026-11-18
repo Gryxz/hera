@@ -26,8 +26,8 @@ from pathlib import Path
 from .. import paths
 from ..workspace import _check_id
 from .contract import load_contract_file
-from .model import (CheckSet, DraftCheck, Requirement, checks_by_runner, validate_draft,  # noqa: F401
-                    validate_relpath)
+from .model import (NATIVE_RUNNER, CheckSet, DraftCheck, Requirement, checks_by_runner,  # noqa: F401
+                    validate_draft, validate_relpath)
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -137,6 +137,9 @@ def freeze(conn: sqlite3.Connection, *, task_id: str, requirements, checks,
     if summary_hash is not None and (not isinstance(summary_hash, str) or not _SHA256.fullmatch(summary_hash)):
         raise ValueError("summary_hash: must be 64 lowercase hexadecimal digits")
     validate_draft(requirements, checks)
+    if adapter in NATIVE_RUNNER and any(c.runner not in (NATIVE_RUNNER[adapter], "contract") for c in checks):
+        raise ValueError(f"checks.runner: adapter {adapter!r} runs only {NATIVE_RUNNER[adapter]!r} and "
+                         "'contract' checks")
     runner_of = {c.relpath: c.runner for c in checks}
     for rel in files:
         validate_relpath(rel, runner_of.get(rel, "pytest"))

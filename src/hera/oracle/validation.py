@@ -34,6 +34,9 @@ from .model import CheckSet, checks_by_runner
 ABSENT = "absent"
 _EXC_LINE = re.compile(r"^E\s+([A-Za-z_][\w.]*(?:Error|Exception))\b", re.M)
 _MISSING_FEATURE = {"ImportError", "ModuleNotFoundError", "AttributeError", "NameError"}
+# node: a module or an export that does not exist yet (file-level load errors of a check file)
+_NODE_MISSING = re.compile(r"ERR_MODULE_NOT_FOUND|Cannot find (?:module|package)|"
+                           r"does not provide an export named|\bis not defined\b")
 
 
 @dataclass(frozen=True)
@@ -63,9 +66,11 @@ class ValidationReport:
 
 def shows_missing_feature(text: str) -> bool:
     """True if the final exception in a failure text is one a not-yet-written feature causes."""
+    found = _EXC_LINE.findall(text)
+    if not found and _NODE_MISSING.search(text):          # a node:test file that failed to load
+        return True
     if "SyntaxError" in text or "IndentationError" in text:
         return False
-    found = _EXC_LINE.findall(text)
     return bool(found) and found[-1].rsplit(".", 1)[-1] in _MISSING_FEATURE
 
 
@@ -78,13 +83,13 @@ def validate_on_base(adapter, checkout_factory: Callable[[], tuple], checkset: C
     statuses: dict[str, list[str]] = {c.check_id: [] for c in checkset.checks}
     texts: dict[str, list[str]] = {c.check_id: [] for c in checkset.checks}
     broken = False
-    has_pytest = bool(checks_by_runner(checkset, "pytest"))
+    has_native = bool(checks_by_runner(checkset, getattr(adapter, "runner", "pytest")))
     has_contract = bool(checks_by_runner(checkset, "contract"))
     for _ in range(runs):
         checkout, base_tree = checkout_factory()
         got: dict = {}
         run_texts: dict[str, str] = {}
-        if has_pytest:
+        if has_native:
             adapter.prepare(checkout, checkset, base_tree=base_tree, include_hidden=True)
             rep = adapter.run(checkout, checkset, include_hidden=True, allow_unsandboxed=allow_unsandboxed)
             if (not rep.results_parsed or not rep.sentinels_ok or not rep.exit_code_consistent

@@ -17,7 +17,7 @@ Format (see docs/ORACLE.md, "Contract checks")::
 
     [[check]]
     node = "parse_twelve_fifty"               # [A-Za-z_][A-Za-z0-9_]{0,63}, unique in the file
-    argv = ["{python}", "-c", "...", "12.50"]
+    argv = ["{python}", "-c", "...", "12.50"]  # "{node}" works the same for JavaScript candidates
     stdin = ""                                # optional, at most 64 KB
     timeout_s = 10                            # optional, default 10, at most 120
     env = { LANG = "C.UTF-8" }                # optional
@@ -65,6 +65,7 @@ MAX_EXPECTED_FILE_BYTES = 1024 * 1024
 MAX_JSON_BYTES = 1024 * 1024
 MAX_JSON_DEPTH = 64
 PYTHON_PLACEHOLDER = "{python}"
+NODE_PLACEHOLDER = "{node}"
 OWNED_DIRS = ("_hera_checks", "_hera_results", "_hera_project")
 
 _NODE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
@@ -96,9 +97,15 @@ class ContractCheck:
     files_equal: tuple[tuple[str, str], ...] = ()
     files_contain: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
-    def resolved_argv(self, python: str) -> list[str]:
-        """``argv`` with every element that is exactly ``{python}`` replaced by ``python``."""
-        return [python if a == PYTHON_PLACEHOLDER else a for a in self.argv]
+    def resolved_argv(self, python: str, node: str | None = None) -> list[str]:
+        """``argv`` with every element that is exactly ``{python}`` replaced by ``python`` and, when
+        ``node`` is given, every element that is exactly ``{node}`` replaced by ``node``."""
+        return [python if a == PYTHON_PLACEHOLDER else node if (node is not None and a == NODE_PLACEHOLDER) else a
+                for a in self.argv]
+
+    @property
+    def needs_node(self) -> bool:
+        return NODE_PLACEHOLDER in self.argv
 
 
 # ---- parsing -----------------------------------------------------------------------------
@@ -182,7 +189,7 @@ def _parse_argv(v, where: str) -> tuple[str, ...]:
     if any(len(a) > MAX_ARG_CHARS for a in out):
         raise ValueError(f"{where}: an element is longer than {MAX_ARG_CHARS} characters")
     prog = out[0]
-    if prog != PYTHON_PLACEHOLDER:
+    if prog not in (PYTHON_PLACEHOLDER, NODE_PLACEHOLDER):
         if not prog or prog.startswith("-") or "\\" in prog or prog.startswith("/") \
                 or PurePosixPath(prog).is_absolute() or re.match(r"[A-Za-z]:", prog):
             raise ValueError(f"{where}: argv[0] must be a bare program name or a relative path "
