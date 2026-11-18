@@ -265,6 +265,84 @@ def test_syntax_error_in_check_file_is_error_and_others_still_run(conn, hera_hom
     assert "SyntaxError" in rep.failure_texts["chk-broken"]
 
 
+# ---- a teardown error after a passing body (S7a limit: false-TAMPER risk) --------------------
+_TEARDOWN_PASS = ("import pytest\nfrom calc import add\n\n\n@pytest.fixture\ndef res():\n    yield 1\n"
+                  "    raise RuntimeError('teardown boom')\n\n\n"
+                  "def test_add_teardown(res):\n    assert add(2, 3) == 5\n")
+_TEARDOWN_FAIL = _TEARDOWN_PASS.replace("== 5", "== 6")
+_SETUP_ERR = _TEARDOWN_PASS.replace("    yield 1\n    raise", "    raise").replace("def test_add_teardown", "def test_add_setup")
+
+
+def _teardown_checkset(conn, src, node="test_add_teardown"):
+    from hera.oracle.model import DraftCheck
+    chk = (DraftCheck("chk-td", ("R-3",), "visible", "test_td.py", node, kind="regression"),
+           DraftCheck("chk-r3-add", ("R-3",), "visible", "test_calc_unchanged.py", "test_add_unchanged",
+                      kind="regression"))
+    files = {"test_td.py": src.encode(), "test_calc_unchanged.py": CHECK_FILES["test_calc_unchanged.py"]}
+    return freeze(conn, task_id="toy", requirements=REQUIREMENTS, checks=chk, files=files)
+
+
+def test_teardown_error_after_passing_body_is_an_error_not_an_inconsistency(conn, hera_home, toy):
+    cs_ = _teardown_checkset(conn, _TEARDOWN_PASS)
+    _c, _p, rep = verify(toy, cs_, toy.base)
+    assert statuses(rep) == {"chk-td": CheckStatus.ERROR, "chk-r3-add": CheckStatus.PASS}
+    assert rep.sentinels_ok and rep.results_parsed and rep.returncode == 1
+    assert rep.exit_code_consistent                      # junit, summary line and exit code agree
+    assert "teardown boom" in rep.failure_texts["chk-td"]
+
+
+def test_teardown_error_after_failing_body_keeps_the_failure(conn, hera_home, toy):
+    cs_ = _teardown_checkset(conn, _TEARDOWN_FAIL)
+    _c, _p, rep = verify(toy, cs_, toy.base)
+    assert statuses(rep)["chk-td"] is CheckStatus.FAIL and statuses(rep)["chk-r3-add"] is CheckStatus.PASS
+    assert rep.exit_code_consistent and rep.sentinels_ok
+    assert "teardown boom" in rep.failure_texts["chk-td"] and "assert 5 == 6" in rep.failure_texts["chk-td"]
+
+
+def test_setup_error_is_still_one_error_and_consistent(conn, hera_home, toy):
+    cs_ = _teardown_checkset(conn, _SETUP_ERR, node="test_add_setup")
+    _c, _p, rep = verify(toy, cs_, toy.base)
+    assert statuses(rep)["chk-td"] is CheckStatus.ERROR and rep.exit_code_consistent and rep.sentinels_ok
+
+
+def test_teardown_error_is_not_tamper_end_to_end(conn, hera_home, toy):
+    from hera.oracle.verify import run_baseline, verify as full_verify
+    from hera.types import Verdict
+    cs_ = _teardown_checkset(conn, _TEARDOWN_PASS)
+    base = run_baseline(toy.repo, AD, allow_unsandboxed=True)
+    out = full_verify(conn, toy.repo, cs_, toy.candidate(CANDIDATES["correct"]), baseline=base,
+                      allow_unsandboxed=True)
+    assert out.verdict is not Verdict.TAMPER and out.receipt.exit_code_consistent
+    assert out.verdict is Verdict.FAIL                   # the erroring check does not count as passed
+
+
+def test_forged_teardown_error_that_hides_a_failure_is_still_inconsistent(toy, cs):
+    """A forger who rewrites a failure into a teardown-style error leaves the counts wrong."""
+    import xml.etree.ElementTree as ET
+    from hera.oracle.adapters import pytest_adapter as pa
+    checkout, _p, rep = verify(toy, cs, toy.candidate(CANDIDATES["hardcoded"]))
+
+    class R:
+        returncode, timed_out, truncated = rep.returncode, False, False
+        stdout = b"4 passed, 2 failed in 0.1s"          # pytest's own line for this run
+    assert pa._parse(checkout, cs, True, R).exit_code_consistent       # control: untouched file agrees
+    path = checkout / "_hera_results" / "junit.xml"
+    t = ET.parse(path)
+    for tc in t.getroot().iter("testcase"):
+        if tc.get("name") == "test_zq_hidden_seven":
+            for ch in list(tc):
+                tc.remove(ch)
+            ET.SubElement(tc, "error", message='failed on teardown with "x"')
+    t.write(path)
+    assert not pa._parse(checkout, cs, True, R).exit_code_consistent
+
+
+def test_skipped_body_with_teardown_error_is_consistent(conn, hera_home, toy):
+    src = _TEARDOWN_PASS.replace("    assert add(2, 3) == 5", "    pytest.skip('later')")
+    _c, _p, rep = verify(toy, _teardown_checkset(conn, src), toy.base)
+    assert statuses(rep)["chk-td"] is CheckStatus.ERROR and rep.exit_code_consistent and rep.sentinels_ok
+
+
 # ---- feedback ---------------------------------------------------------------------------
 def test_feedback_redacts_hidden_checks(toy, cs):
     _c, _p, rep = verify(toy, cs, toy.candidate(CANDIDATES["hardcoded"]))

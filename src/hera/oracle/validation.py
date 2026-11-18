@@ -63,6 +63,11 @@ class ValidationReport:
     def health_of(self, check_id: str) -> CheckValidation:
         return next(c for c in self.checks if c.check_id == check_id)
 
+    def health_rows(self) -> dict[str, tuple[CheckHealth, dict]]:
+        """What to store in ``checks.health``: check id -> (label, evidence) for ``checkstore.freeze``."""
+        return {c.check_id: (c.health, {"rule": c.rule, "reason": c.reason, "statuses": list(c.statuses),
+                                        "runs": self.runs}) for c in self.checks}
+
 
 def shows_missing_feature(text: str) -> bool:
     """True if the final exception in a failure text is one a not-yet-written feature causes."""

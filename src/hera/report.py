@@ -145,7 +145,8 @@ def attempt_records(conn: sqlite3.Connection, *, since: float | None = None,
             elif e["kind"] == "diagnosis" and not d.get("skipped"):
                 diagnoses.append(d)
         diag_usd = [r["usd"] for r in conn.execute(
-            "SELECT usd FROM model_calls WHERE task_id=? AND purpose LIKE 'diagnose%' ORDER BY id", (tid,))]
+            "SELECT usd FROM model_calls WHERE task_id=? AND purpose LIKE 'diagnose%' "
+            "AND purpose NOT LIKE '%:transport_error:estimated' ORDER BY id", (tid,))]
         diag_for: dict[int, tuple[float, int]] = {}
         for i, d in enumerate(diagnoses):
             usd, n = diag_for.get(d.get("attempt"), (0.0, 0))
@@ -228,6 +229,23 @@ def _candidate_outcomes(records, select) -> tuple[int, int]:
             evaluated += 1
             passed += any(o.passed for o in same)
     return evaluated, passed
+
+
+def check_health(conn: sqlite3.Connection, task_ids) -> dict:
+    """Weak checks in the current check set of each task (``checks.health``): numbers for the report.
+    ``summary`` itself stays a pure function of the attempt records."""
+    from .agent.orchestrator import task_checkset_hash
+    from .oracle.checkstore import health_counts
+    total = weak = 0
+    with_weak: list[str] = []
+    for tid in task_ids:
+        h = task_checkset_hash(conn, tid)
+        counts = health_counts(conn, h) if h else {}
+        total += sum(counts.values())
+        weak += counts.get("weak", 0)
+        if counts.get("weak", 0):
+            with_weak.append(tid)
+    return {"checks": total, "weak": weak, "tasks_with_weak": with_weak}
 
 
 def summary(records) -> dict:

@@ -3,7 +3,7 @@
 Only valid checks count. Flaky and invalid checks are excluded from the verdict and
 reported separately; a check that errored or timed out counts as not passing."""
 from __future__ import annotations
-from ..types import CheckHealth, CheckStatus, Receipt, Verdict
+from ..types import COUNTED_HEALTH, CheckStatus, Receipt, Verdict
 
 
 def verdict(r: Receipt) -> tuple[Verdict, list[str]]:
@@ -22,7 +22,7 @@ def verdict(r: Receipt) -> tuple[Verdict, list[str]]:
     if r.dispute_open:
         return Verdict.ORACLE_DISPUTED, ["an unresolved dispute is open"]
 
-    counted = [c for c in r.results if c.health in (CheckHealth.VALID, CheckHealth.WEAK)]
+    counted = [c for c in r.results if c.health in COUNTED_HEALTH]
     bad = [c for c in counted if c.status is not CheckStatus.PASS]
     vis = [c.check_id for c in bad if c.visibility == "visible"]
     hid = [c.check_id for c in bad if c.visibility == "hidden"]

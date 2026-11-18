@@ -188,6 +188,26 @@ stopped is returned as stored by `run_task` and `hera run`; only `continue_task`
 goes on after a stop, and only for the stops listed below. The window in which a paid call can still be
 repeated is the one described above, for the diagnosis call as for a turn.
 
+**The append is atomic.** `PRIMARY KEY(task_id, seq)` is the uniqueness constraint (no schema change was
+needed). `orchestrator._append` runs one `INSERT ... SELECT COALESCE(MAX(seq),0)+1 ...` inside
+`BEGIN IMMEDIATE` (or inside the caller's transaction, as `file_dispute` has one) and returns the seq of
+the row it just inserted (`last_insert_rowid`), so two connections to the same database file get
+unique, gap-free numbers and each learns its own. A second writer waits for the first (SQLite's busy
+timeout, 5 s by default) rather than interleaving; a collision, if one ever happened, would raise
+`IntegrityError` instead of writing a second row. `tests/test_event_log.py` runs two threads, each with its
+own connection, against one file.
+
+**One runner per task.** `run_task` and `continue_task` take an advisory `flock` on
+`<directory of state.sqlite>/locks/<hash of the task id>.lock`. A second `hera run` (or `hera task
+continue`) of the same task while the first is alive is refused with `TaskBusy` (a `TaskConfigError`: the
+CLI prints "error: this task is already being run by another process" and exits 2) before anything is
+logged or sent. The operating system drops the lock when its process dies, so after a crash there is no
+stale lock and resuming works at once. Different tasks do not block each other. Known limits: the lock
+is advisory (a process that does not go through `run_task` ignores it; the append stays atomic
+regardless); it needs `fcntl` (macOS and Linux; where it is missing no lock is taken); an in-memory
+database takes no lock; the small `locks/*.lock` files are left behind; and `flock` on a network file
+system may not exclude another machine.
+
 ## Privacy of personal and proprietary repositories: local-only by design
 
 In `hera run`, a repository whose class is personal or proprietary is routed to a local provider only.
@@ -313,7 +333,8 @@ as conclusions.
 3. `hera checks freeze --task T --repo /path/to/repo --spec spec.toml --summary HASH [--base COMMIT] [--allow-unsandboxed]`
    needs that approved summary (same task, requirements exactly equal to the spec's) and creates the task workspace if needed, runs the checks on the base commit in a scratch store (refusing,
    with exit 3 and per-check health, if any check is flaky or invalid; `--skip-validation` overrides),
-   freezes them and prints `check-set hash: <hash>`. The repository must be in the privacy policy with
+   freezes them (storing each check's health in `checks.health`; `--skip-validation` stores `unvalidated`)
+   and prints `check-set hash: <hash>`. The repository must be in the privacy policy with
    its class, or it counts as sensitive and no remote provider will be used.
 4. `hera providers check <name>` for each provider in hera.toml (the keys come from the environment).
 5. `hera run --task T --checkset HASH --objective "..." [--max-usd X] [--without-approved-summary] [--allow-unsandboxed]` prints each
