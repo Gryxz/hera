@@ -5,6 +5,8 @@ Blocked results carry fixed notices that never include segment content or matche
 """
 from __future__ import annotations
 import ipaddress
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -60,6 +62,23 @@ class SendResult:
     # the gateway allowed the send but no response came back (connection refused, timeout, reset):
     # not a privacy decision, and the request may have reached the destination
     transport_error: bool = False
+    # with transport_error: False only when the failure certainly happened before any request bytes
+    # left (refused connection, name resolution, TLS handshake or certificate failure); see
+    # `_may_have_arrived`. True means the request may have been received, and billed, anyway.
+    may_have_arrived: bool = False
+
+
+def _may_have_arrived(exc: BaseException) -> bool:
+    """Could the request body have reached the destination before `exc` ended the call?
+
+    False only for failures that certainly came before any request bytes were sent: a refused
+    connection, a name-resolution failure, a TLS handshake or certificate failure. Everything else
+    is True, including every timeout (a connect timeout and a read timeout look alike), resets,
+    disconnects, short reads, broken pipes and unknown exceptions: unrecorded spend is the unsafe side.
+    urllib wraps errors raised while connecting in URLError, so its `.reason` is classified instead."""
+    if isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError):
+        exc = exc.reason
+    return not isinstance(exc, (ConnectionRefusedError, socket.gaierror, ssl.SSLError))
 
 
 class _Blocked(Exception):
@@ -238,4 +257,5 @@ class Gateway:
         except urllib.error.HTTPError as e:
             return SendResult(sent=True, status=e.code, body=e.read())
         except Exception as e:
-            return SendResult(sent=False, reason=f"transport error: {type(e).__name__}", transport_error=True)
+            return SendResult(sent=False, reason=f"transport error: {type(e).__name__}",
+                              transport_error=True, may_have_arrived=_may_have_arrived(e))

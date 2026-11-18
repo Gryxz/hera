@@ -1,9 +1,13 @@
+import http.client
 import json
+import socket
+import ssl
 import threading
+import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 from hera.privacy import translog
-from hera.privacy.gateway import Destination, Gateway, Segment
+from hera.privacy.gateway import Destination, Gateway, SendResult, Segment, _may_have_arrived
 from hera.privacy.grants import GrantStore
 from hera.privacy.labels import LabelStore, content_hash, label_bytes
 from hera.privacy.policy import Policy
@@ -167,6 +171,57 @@ def test_transport_error_does_not_raise(conn):
     r = e.gw.send("prov", [e.label("a", "pub", b"x")], purpose="p")
     assert not r.sent and r.reason.startswith("transport error") and r.transport_error
     assert e.rows()[-1]["decision"] == "sent"        # bytes may have left; record stays
+
+
+def test_refused_connection_is_certainly_not_received(conn):
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    class Srv:
+        server_address = ("127.0.0.1", port)
+    e = Env(conn, Srv())
+    r = e.gw.send("prov", [e.label("a", "pub", b"x")], purpose="p")
+    assert r.transport_error and r.may_have_arrived is False
+
+
+def test_send_result_defaults_to_not_arrived():
+    assert SendResult(sent=True).may_have_arrived is False
+    assert SendResult(sent=False, reason="x").may_have_arrived is False
+
+
+@pytest.mark.parametrize("exc", [
+    ConnectionRefusedError(),
+    socket.gaierror(socket.EAI_NONAME, "no such host"),
+    ssl.SSLError("handshake failure"),
+    ssl.SSLCertVerificationError("certificate verify failed"),
+    urllib.error.URLError(ConnectionRefusedError()),
+    urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, "no such host")),
+    urllib.error.URLError(ssl.SSLError("handshake failure")),
+    urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed")),
+])
+def test_failures_before_any_bytes_left_did_not_arrive(exc):
+    assert _may_have_arrived(exc) is False
+
+
+@pytest.mark.parametrize("exc", [
+    socket.timeout("timed out"),
+    TimeoutError(),
+    ConnectionResetError(),
+    BrokenPipeError(),
+    ConnectionAbortedError(),
+    http.client.RemoteDisconnected("closed"),
+    http.client.IncompleteRead(b"part"),
+    http.client.BadStatusLine("x"),
+    OSError("unknown"),
+    ValueError("unknown"),
+    urllib.error.URLError(socket.timeout("timed out")),
+    urllib.error.URLError(ConnectionResetError()),
+    urllib.error.URLError("some text reason"),
+])
+def test_other_failures_may_have_arrived(exc):
+    assert _may_have_arrived(exc) is True
 
 
 def test_sensitive_content_needs_a_declassified_grant(env, sink):

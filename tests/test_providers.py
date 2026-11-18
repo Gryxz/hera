@@ -1,4 +1,5 @@
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
@@ -49,6 +50,56 @@ class Mock:
     def close(self):
         self.srv.shutdown()
         self.srv.server_close()
+
+
+class SilentServer:
+    """A plain socket listener: reads the whole request, then closes without replying (or, with
+    hang=True, keeps the connection open and silent until close())."""
+    def __init__(self, hang=False):
+        self.hang = hang
+        self.requests = 0
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}/v1/chat"
+        self._held = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            try:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                head, _, rest = data.partition(b"\r\n\r\n")
+                want = 0
+                for line in head.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        want = int(line.split(b":")[1])
+                while len(rest) < want:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    rest += chunk
+                self.requests += 1
+            except OSError:
+                pass
+            if self.hang:
+                self._held.append(conn)
+            else:
+                conn.close()
+
+    def close(self):
+        self.sock.close()
+        for c in self._held:
+            c.close()
 
 
 @pytest.fixture
@@ -302,6 +353,78 @@ def test_transport_failure_is_a_provider_error_not_a_privacy_block(conn, mock):
     assert not isinstance(ei.value, ProviderBlocked) and ei.value.status is None
     (row,) = conn.execute("SELECT decision FROM transmissions").fetchall()
     assert row["decision"] == "sent"                  # the log says it was allowed out (it may have arrived)
+
+
+
+def test_refused_connection_records_nothing(conn, mock):
+    e = Env(conn, mock)
+    mock.close()
+    with pytest.raises(ProviderError, match="could not be reached"):
+        e.openai().complete([e.msg("user", "u", "q")], max_tokens=1000, task_id="t")
+    assert e.calls() == []
+
+
+def test_closed_without_reply_records_the_estimate(conn, mock):
+    srv = SilentServer()
+    try:
+        e = Env(conn, srv)
+        p = e.openai()
+        m = e.msg("user", "u", "q")
+        body = p._build([m], 1000, (), {})
+        with pytest.raises(ProviderError, match="could not be reached") as ei:
+            p.complete([m], max_tokens=1000, task_id="t", purpose="implement")
+        assert not isinstance(ei.value, ProviderBlocked)
+        (row,) = e.calls()
+        assert row["purpose"] == "implement:transport_error:estimated"
+        assert row["task_id"] == "t" and row["tier"] == "cheap"
+        assert row["destination"] == "prov" and row["model_id"] == "model-x"
+        assert row["output_tokens"] == 1000
+        assert row["usd"] == pytest.approx(estimate_usd(PRICES["cheap"], len(body), 1000))
+        assert e.ledger.spent_task("t") == pytest.approx(row["usd"])
+        assert srv.requests == 1
+    finally:
+        srv.close()
+
+
+def test_recorded_estimate_counts_against_the_next_cap_check(conn):
+    srv = SilentServer()
+    try:
+        # one call's estimate (about $0.004) fits under the task cap, two do not
+        e = Env(conn, srv, budget=Budget(per_task_usd=0.005, per_day_usd=10, per_month_usd=100))
+        p = e.openai()
+        m = e.msg("user", "u", "q")
+        with pytest.raises(ProviderError):
+            p.complete([m], max_tokens=1000, task_id="t")
+        with pytest.raises(BudgetExceeded) as ei:
+            p.complete([m], max_tokens=1000, task_id="t")
+        assert ei.value.cap == "per-task"
+        assert len(e.calls()) == 1 and srv.requests == 1       # nothing was sent the second time
+    finally:
+        srv.close()
+
+
+def test_read_timeout_records_the_estimate(conn):
+    srv = SilentServer(hang=True)
+    try:
+        e = Env(conn, srv)
+        e.gw.timeout = 0.3
+        with pytest.raises(ProviderError, match="could not be reached"):
+            e.anthropic().complete([e.msg("user", "u", "q")], max_tokens=500, task_id="t")
+        (row,) = e.calls()
+        assert row["purpose"] == "implement:transport_error:estimated" and row["usd"] > 0
+    finally:
+        srv.close()
+
+
+def test_local_tier_transport_failure_records_nothing(conn):
+    srv = SilentServer()
+    try:
+        e = Env(conn, srv, local=True)
+        with pytest.raises(ProviderError, match="could not be reached"):
+            e.openai(tier="local").complete([e.msg("user", "u", "q", label=False)], max_tokens=1000)
+        assert e.calls() == []
+    finally:
+        srv.close()
 
 
 # -- local tier --------------------------------------------------------------------------------
