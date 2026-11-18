@@ -365,7 +365,10 @@ runner (`node --test`); `get_adapter(checkset.adapter)` chooses it in `verify`, 
   `<prefix>/bin/node`) as a readable path, so it works when Node lives under `/Users` on macOS CI. It is
   skipped when it is the root or, on Linux, already inside the `/usr` system bind. Node runs without an
   address-space limit (`memory_mb=None`): type stripping uses WebAssembly, which reserves more address
-  space than any `RLIMIT_AS` worth setting.
+  space than any `RLIMIT_AS` worth setting. The memory limit becomes V8's heap cap instead
+  (`NODE_OPTIONS=--max-old-space-size=<memory_mb>`, inherited by the test runner's child processes): it
+  bounds the JavaScript heap, not native allocations such as large Buffers, so it is a weaker bound than
+  the address-space limit the pytest adapter gets on Linux.
 - The project's own pre-existing tests (regression baseline) are the `*.test.js|mjs|ts|mts` files of the
   base tree, run one process per file with the same two reporters; test ids are
   `<file>::<suite> > <test>`.

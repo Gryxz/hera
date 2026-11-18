@@ -56,6 +56,11 @@ _CHECKS_PACKAGE_JSON = '{"type": "module"}\n'
 _ENV = {"NODE_OPTIONS": "", "NODE_PATH": "", "NODE_NO_WARNINGS": "1", "NO_COLOR": "1",
         "NODE_DISABLE_COLORS": "1"}
 
+def heap_cap_option(memory_mb: int) -> str:
+    """The NODE_OPTIONS value that caps V8's old-generation heap at ``memory_mb`` (at least 64 MB)."""
+    return f"--max-old-space-size={max(64, int(memory_mb))}"
+
+
 _EXTS = ("js", "mjs", "cjs", "ts", "mts", "cts")
 _TEST_NAME_PATTERNS = ("*.test.{e}", "*.spec.{e}", "*-test.{e}", "*_test.{e}", "test-*.{e}", "test.{e}")
 PROTECTED_GLOBS = (
@@ -369,9 +374,14 @@ class NodeAdapter:
         if os.path.lexists(rdir):
             _remove(rdir)
         rdir.mkdir()
-        # V8 and WebAssembly (type stripping) reserve address space, so RLIMIT_AS cannot be used
+        # V8 and WebAssembly (type stripping) reserve address space, so RLIMIT_AS cannot be used.
+        # The memory limit becomes V8's heap cap instead (via NODE_OPTIONS, so the test runner's
+        # child processes inherit it): it bounds the JavaScript heap, not total memory.
         lim = dataclasses.replace(limits, memory_mb=None, wall_s=max(remaining_s, 1.0))
-        rr = sandbox.run(self._argv(info, rel, results_dir), cwd=checkout, env=_ENV,
+        env = dict(_ENV)
+        if limits.memory_mb is not None:
+            env["NODE_OPTIONS"] = heap_cap_option(limits.memory_mb)
+        rr = sandbox.run(self._argv(info, rel, results_dir), cwd=checkout, env=env,
                          read_only=readable_paths(info.path), limits=lim, allow_unsandboxed=allow_unsandboxed)
         root = None
         data = _read_results(rdir / JUNIT_NAME)

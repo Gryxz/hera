@@ -15,7 +15,7 @@ from hera.oracle.checkstore import CheckStoreTampered, freeze
 from hera.oracle.model import DraftCheck
 from hera.sandbox import Limits, detect_mechanism
 from hera.types import CheckStatus
-from toyrepo_js import (CANDIDATES, CHECK_FILES, CHECKS, HARDCODED_CALC, PACKAGE_JSON,
+from toyrepo_js import (CALC, CANDIDATES, CHECK_FILES, CHECKS, HARDCODED_CALC, PACKAGE_JSON,
                         REQUIREMENTS, TEST_CALC, make_js_toy, needs_node)
 
 pytestmark = needs_node
@@ -113,7 +113,8 @@ def test_node_install_directory_is_made_readable_and_the_environment_is_scrubbed
     for argv, kw in seen:
         assert os.path.realpath(argv[0]) == node and "--test" in argv
         assert kw["read_only"] == ([] if prefix == "/" or prefix.startswith("/usr/") or prefix == "/usr" else [prefix])
-        assert kw["env"]["NODE_OPTIONS"] == "" and kw["limits"].memory_mb is None
+        # no address-space limit (WebAssembly), but the memory limit caps V8's heap instead
+        assert kw["env"]["NODE_OPTIONS"] == "--max-old-space-size=2048" and kw["limits"].memory_mb is None
         assert argv[-1].startswith("_hera_checks/") and not any(a.startswith("/") for a in argv[1:])
     assert [a[-1] for a, _k in seen].count("_hera_checks/_sentinel/hera_sentinel.test.mjs") == 1
 
@@ -190,6 +191,20 @@ def test_candidate_cannot_plant_results_for_a_later_run(jtoy, conn, hera_home):
     _c, _p, rep = verify(jtoy, cs_, jtoy.candidate({"calc.js": evil}))
     assert statuses(rep)["chk-hidden-r1-seven"] is CheckStatus.FAIL          # the real hidden file ran
     assert rep.sentinels_ok and rep.exit_code_consistent
+
+
+def test_heap_cap_follows_the_memory_limit():
+    assert na.heap_cap_option(512) == "--max-old-space-size=512"
+    assert na.heap_cap_option(10) == "--max-old-space-size=64"       # floor: V8 needs some heap to start
+
+
+def test_a_candidate_that_exhausts_the_heap_does_not_pass(jtoy, cs):
+    hog = CALC + "\nconst hoard = [];\nwhile (true) hoard.push(new Array(1e6).fill(1));\n"
+    t0 = time.monotonic()
+    _c, _p, rep = verify(jtoy, cs, jtoy.candidate({"calc.js": hog}), limits=Limits(wall_s=60, memory_mb=128))
+    assert time.monotonic() - t0 < 60                                # stopped by the heap cap, not the clock
+    assert not rep.timed_out
+    assert all(st is not CheckStatus.PASS for st in statuses(rep).values())
 
 
 def test_slow_candidate_times_out(jtoy, cs):
