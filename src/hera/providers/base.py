@@ -2,10 +2,12 @@
 `Gateway.send`, so this package imports no network library.
 
 Order of one call: build body -> consistency check -> budget check (nothing sent if it fails)
--> gateway -> status check -> parse -> ledger record.
+-> gateway -> status check -> parse -> ledger record. A transport failure after which the request
+may have arrived records the pre-call estimate (`:transport_error:estimated`) before raising.
 """
 from __future__ import annotations
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Sequence
@@ -174,8 +176,8 @@ class BaseProvider:
         body = self._build(messages, max_tokens, tools, options)
         self._check_body(messages, body)
         price = self.ledger.prices[self.tier]
-        self.ledger.check(task_id=task_id, tier=self.tier,
-                          estimate_usd=estimate_usd(price, len(body), max_tokens))
+        estimate = estimate_usd(price, len(body), max_tokens)
+        self.ledger.check(task_id=task_id, tier=self.tier, estimate_usd=estimate)
         segments: list[Segment] = []
         for m in messages:
             segments.append(Segment(m.artefact_id, m.data))
@@ -186,6 +188,14 @@ class BaseProvider:
         if not result.sent and result.transport_error:
             # allowed by the gateway but unanswered: a provider failure (it may have been received,
             # and possibly billed, by the provider), never a privacy block
+            if result.may_have_arrived and self.tier != "local":
+                # a request that left may have been billed in full: record the pre-call estimate so
+                # the caps see it (conservative: input at 3 bytes per token plus max_tokens of output)
+                self.ledger.record(
+                    tier=self.tier,
+                    usage=Usage(input_tokens=math.ceil(len(body) / 3), output_tokens=max_tokens),
+                    task_id=task_id, purpose=f"{purpose}:transport_error:estimated",
+                    destination=self.destination_name, model_id=self.model_id)
             raise ProviderError(f"the provider could not be reached ({result.reason})")
         if not result.sent:
             raise ProviderBlocked(result.reason)

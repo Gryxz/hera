@@ -145,7 +145,8 @@ def attempt_records(conn: sqlite3.Connection, *, since: float | None = None,
             elif e["kind"] == "diagnosis" and not d.get("skipped"):
                 diagnoses.append(d)
         diag_usd = [r["usd"] for r in conn.execute(
-            "SELECT usd FROM model_calls WHERE task_id=? AND purpose LIKE 'diagnose%' ORDER BY id", (tid,))]
+            "SELECT usd FROM model_calls WHERE task_id=? AND purpose LIKE 'diagnose%' "
+            "AND purpose NOT LIKE '%:transport_error:estimated' ORDER BY id", (tid,))]
         diag_for: dict[int, tuple[float, int]] = {}
         for i, d in enumerate(diagnoses):
             usd, n = diag_for.get(d.get("attempt"), (0.0, 0))
