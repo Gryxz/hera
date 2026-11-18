@@ -6,6 +6,18 @@ from .privacy import translog
 from .store import db
 
 
+def _usd(text: str) -> float:
+    """A dollar cap from the command line: finite and above 0 (`nan` would switch the cap off)."""
+    import math
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not math.isfinite(v) or v <= 0:
+        raise argparse.ArgumentTypeError(f"must be a finite amount above 0, got {text!r}")
+    return v
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="hera")
     ap.add_argument("--version", action="version", version=__version__)
@@ -33,13 +45,33 @@ def main(argv: list[str] | None = None) -> int:
     rn.add_argument("--task", required=True)
     rn.add_argument("--checkset", required=True, help="check-set hash printed by `hera checks freeze`")
     rn.add_argument("--objective", required=True)
-    rn.add_argument("--max-usd", type=float, help="per-task dollar cap (default: the budget in hera.toml)")
+    rn.add_argument("--max-usd", type=_usd, help="per-task dollar cap (default: the budget in hera.toml)")
     rn.add_argument("--allow-unsandboxed", action="store_true",
                     help="run with NO network or filesystem isolation if no sandbox mechanism exists")
     tk = sub.add_parser("task", help="inspect a task")
     tksub = tk.add_subparsers(dest="tcmd", required=True)
     ts = tksub.add_parser("status", help="show a task's events and its current status")
     ts.add_argument("id")
+    tc = tksub.add_parser("continue", help="continue a task that stopped as BUDGET_CENSORED, PROVIDER_ERROR "
+                                           "or (once resolved) AWAITING_DISPUTE")
+    tc.add_argument("id")
+    tc.add_argument("--max-usd", type=_usd,
+                    help="per-task dollar cap for this continuation only (default: the budget in hera.toml)")
+    tc.add_argument("--allow-unsandboxed", action="store_true",
+                    help="run with NO network or filesystem isolation if no sandbox mechanism exists")
+    dp = sub.add_parser("dispute", help="list and resolve disputes about visible checks")
+    dpsub = dp.add_subparsers(dest="dcmd", required=True)
+    dl = dpsub.add_parser("list", help="id, task, check, requirement, status, opened time and argument")
+    dl.add_argument("--open", action="store_true", help="only disputes that are still open")
+    dr = dpsub.add_parser("resolve", help="close a dispute (a human decides)")
+    dr.add_argument("id")
+    dr.add_argument("--outcome", required=True, choices=["upheld", "check_amended", "requirement_amended"])
+    dr.add_argument("--resolver", required=True, help="who decides: human:<name>")
+    dr.add_argument("--new-checkset", help="check_amended only: hash of the frozen replacement check set")
+    rp = sub.add_parser("report", help="the learning ledger: pass rates, UNKNOWN rate, dollars per verified task")
+    rp.add_argument("--since", help="only attempts started on or after this date (YYYY-MM-DD, local time)")
+    rp.add_argument("--task", help="only this task")
+    rp.add_argument("--json", action="store_true", help="print the summary and every record as JSON")
     pr = sub.add_parser("providers", help="list configured model providers or test one")
     psub = pr.add_subparsers(dest="pcmd", required=True)
     psub.add_parser("list", help="name, kind, tier, host and whether the key variable is set")
@@ -55,7 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "run":
         return _run(a)
     if a.cmd == "task":
-        return _task_status(a)
+        return _task_continue(a) if a.tcmd == "continue" else _task_status(a)
+    if a.cmd == "dispute":
+        return _dispute_list(a) if a.dcmd == "list" else _dispute_resolve(a)
+    if a.cmd == "report":
+        return _report(a)
     if a.cmd == "init":
         home = paths.ensure_layout()
         db.connect(paths.db_path()).close()
@@ -179,6 +215,16 @@ def format_event(ev: dict) -> str:
         return f"dispute filed for attempt {d['attempt']} ({d['dispute_id']})"
     if k == "dispute_rejected":
         return f"dispute from attempt {d['attempt']} rejected"
+    if k == "continued":
+        extra = []
+        if d.get("max_usd") is not None:
+            extra.append(f"cap ${d['max_usd']:.4f} for this continuation")
+        if d.get("checkset_hash"):
+            extra.append(f"check set {d['checkset_hash'][:12]}")
+        if d.get("dispute_id"):
+            extra.append(f"dispute {d['dispute_id']}: {d.get('outcome')}")
+        return (f"continued after {d.get('from_status')} ({d.get('reason')})"
+                + (": " + ", ".join(extra) if extra else ""))
     if k == "stopped":
         return f"stopped: {d['status']}" + (f" ({d['reason']})" if d.get("reason") else "")
     return k
@@ -361,6 +407,10 @@ def _run(a) -> int:
         return 2
     finally:
         conn.close()
+    return _print_outcome(out)
+
+
+def _print_outcome(out) -> int:
     lv = next((e["detail"] for e in reversed(out.events) if e["kind"] == "verified"), None)
     print(f"status: {out.status}")
     print(f"verdict: {out.verdict or 'none'}")
@@ -377,6 +427,186 @@ def _run(a) -> int:
     if out.final_commit:
         print(f"final commit: {out.final_commit}")
     return 0 if out.status == "PASSED" else 3
+
+
+def _task_continue(a) -> int:
+    """Exit 0 for PASSED, 3 for any other final status or a refusal (nothing is logged then), 2 for a
+    configuration error."""
+    import os
+    from . import config
+    from .agent.orchestrator import (ContinueRefused, TaskConfigError, TaskSpec, continue_task, select_roles,
+                                     task_checkset_hash)
+    from .ledger import Ledger
+    from .oracle import checkstore
+    from .privacy.gateway import Gateway
+    from .privacy.grants import GrantStore
+    from .privacy.labels import LabelStore
+    from .privacy.policy import load_policy
+    from .privacy.scanners import BLOCKING, default_scanners
+    from .providers.registry import build_providers
+    from .workspace import TaskRepo
+    cfg_path = paths.config_path()
+    if not cfg_path.exists() or not paths.db_path().exists():
+        print("not initialised or no hera.toml; run `hera init` and copy config/hera.example.toml "
+              f"to {cfg_path}", file=sys.stderr)
+        return 2
+    try:
+        cfg = config.load(cfg_path)
+    except Exception as e:
+        print(f"error: could not read the configuration: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    conn = db.connect(paths.db_path())
+    try:
+        row = conn.execute("SELECT objective, repo_id FROM tasks WHERE id=?", (a.id,)).fetchone()
+        if row is None or not row["objective"]:
+            print(f"error: no such task: {a.id}", file=sys.stderr)
+            return 2
+        h = task_checkset_hash(conn, a.id)
+        if h is None:
+            print("error: cannot tell which check set the task uses", file=sys.stderr)
+            return 2
+        cs = checkstore.load(conn, h)
+        policy = load_policy(paths.policy_dir() / "policy.toml")
+        labels = LabelStore(conn)
+        gateway = Gateway(conn, labels, GrantStore(conn), {}, scanners=default_scanners(policy), blocking=BLOCKING)
+        ledger = Ledger(conn, cfg.budget, cfg.prices)
+        built = build_providers(cfg, gateway, ledger, os.environ)
+        roles = select_roles(built)
+        if "default" not in roles and "local" not in roles:
+            why = "; ".join(f"{n}: {r}" for n, r in sorted(built.absent.items())) or "none configured"
+            print(f"error: no provider for the default tier ({why})", file=sys.stderr)
+            return 2
+        repo = TaskRepo.open(a.id)
+        spec = TaskSpec(task_id=a.id, repo=repo, base_commit=repo.base_commit, checkset=cs,
+                        objective=row["objective"], repo_id=row["repo_id"] or "", limits=cfg.recovery,
+                        allow_unsandboxed=a.allow_unsandboxed)
+        try:
+            out = continue_task(conn, a.id, spec=spec, providers=built, policy=policy, max_usd=a.max_usd,
+                                on_event=lambda ev: print(f"[{ev['seq']}] {format_event(ev)}", flush=True))
+        except ContinueRefused as e:
+            print(f"not continued: {e}", file=sys.stderr)
+            return 3
+    except (TaskConfigError, FileNotFoundError, KeyError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    return _print_outcome(out)
+
+
+def _clean(text: str, limit: int) -> str:
+    """One line of printable text (a dispute argument is written by a model)."""
+    flat = " ".join(str(text or "").split())
+    return "".join(ch if ch.isprintable() else "?" for ch in flat)[:limit]
+
+
+def _utc(ts) -> str:
+    import time
+    return time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(ts)) if ts else "-"
+
+
+def _dispute_list(a) -> int:
+    conn = _open_db()
+    if conn is None:
+        return 2
+    try:
+        rows = conn.execute("SELECT * FROM disputes" + (" WHERE status='open'" if a.open else "")
+                            + " ORDER BY opened_at, id").fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        print("no open disputes" if a.open else "no disputes")
+        return 0
+    for r in rows:
+        line = (f"{r['id']}  task={r['task_id']}  check={r['check_id']}  requirement={r['requirement_id']}  "
+                f"status={r['status']}  opened={_utc(r['opened_at'])}")
+        if r["status"] != "open":
+            line += f"  outcome={r['outcome']}  resolver={_clean(r['resolver'], 80)}"
+        print(line)
+        print(f"  argument: {_clean(r['argument'], 200)}")
+    return 0
+
+
+def _dispute_resolve(a) -> int:
+    """Exit 0 when resolved, 2 for a refusal or an error (the dispute is left as it was)."""
+    from .oracle.disputes import resolve_dispute
+    who = a.resolver.strip()
+    if not who.startswith("human:") or not who[len("human:"):].strip():
+        print("error: from the command line the resolver must be a person: --resolver human:<name>", file=sys.stderr)
+        return 2
+    if a.new_checkset and a.outcome != "check_amended":
+        print("error: --new-checkset only goes with --outcome check_amended", file=sys.stderr)
+        return 2
+    if a.outcome == "check_amended" and not a.new_checkset:
+        print("error: --outcome check_amended needs --new-checkset HASH (freeze the amended check set first)",
+              file=sys.stderr)
+        return 2
+    conn = _open_db()
+    if conn is None:
+        return 2
+    try:
+        row = conn.execute("SELECT * FROM disputes WHERE id=?", (a.id,)).fetchone()
+        if row is None:
+            print(f"error: no such dispute: {a.id}", file=sys.stderr)
+            return 2
+        if row["status"] != "open":
+            print("error: dispute is already resolved", file=sys.stderr)
+            return 2
+        if a.outcome == "check_amended":
+            cs = conn.execute("SELECT task_id FROM checksets WHERE hash=?", (a.new_checkset,)).fetchone()
+            if cs is None:
+                print("error: unknown check set: freeze the amended check set first", file=sys.stderr)
+                return 2
+            if cs["task_id"] != row["task_id"]:
+                print("error: that check set belongs to a different task", file=sys.stderr)
+                return 2
+        models = [r["model_id"] for r in conn.execute(
+            "SELECT DISTINCT model_id FROM attempts WHERE task_id=? AND model_id IS NOT NULL AND model_id != ''",
+            (row["task_id"],))]
+        try:
+            resolve_dispute(conn, a.id, outcome=a.outcome, resolver=who, implementer_model=models,
+                            new_checkset_hash=a.new_checkset)
+        except (ValueError, KeyError) as e:
+            print(f"error: {e.args[0] if e.args else e}", file=sys.stderr)
+            return 2
+        task = row["task_id"]
+    except Exception as e:
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    print(f"dispute {a.id} resolved: {a.outcome} by {who}")
+    print(f"the task can now be continued: hera task continue {task}")
+    return 0
+
+
+def _report(a) -> int:
+    import json
+    import time
+    from . import report
+    since = None
+    if a.since:
+        try:
+            since = time.mktime(time.strptime(a.since, "%Y-%m-%d"))
+        except ValueError:
+            print("error: --since must be a date like 2026-11-01", file=sys.stderr)
+            return 2
+    conn = _open_db()
+    if conn is None:
+        return 2
+    try:
+        recs = report.attempt_records(conn, since=since, task_id=a.task)
+    finally:
+        conn.close()
+    summ = report.summary(recs)
+    if a.json:
+        print(json.dumps({"summary": summ, "attempts": [r.to_dict() for r in recs]}, indent=2, sort_keys=True))
+    else:
+        print(report.render_summary(summ))
+    return 0
 
 
 def _task_status(a) -> int:

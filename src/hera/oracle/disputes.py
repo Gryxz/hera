@@ -10,6 +10,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import time
+from typing import Sequence
 
 from . import checkstore
 
@@ -42,9 +43,10 @@ def has_open_dispute(conn: sqlite3.Connection, task_id: str) -> bool:
 
 
 def resolve_dispute(conn: sqlite3.Connection, dispute_id: str, *, outcome: str, resolver: str,
-                    implementer_model: str, new_checkset_hash: str | None = None) -> None:
+                    implementer_model: "str | Sequence[str]", new_checkset_hash: str | None = None) -> None:
     """Close a dispute. ``resolver`` must differ from the check's author model and from
-    ``implementer_model`` (the model recorded as implementing the task). ``check_amended``
+    ``implementer_model`` (the model recorded as implementing the task; a task can have had
+    several, so a sequence of model identifiers is accepted too). ``check_amended``
     needs ``new_checkset_hash`` and records it with ``checkstore.supersede``;
     ``requirement_amended`` needs a human resolver ("human:...")."""
     if outcome not in OUTCOMES:
@@ -60,7 +62,9 @@ def resolve_dispute(conn: sqlite3.Connection, dispute_id: str, *, outcome: str, 
                           (row["check_id"], row["checkset_hash"])).fetchone()
     author_model = (author["author_model"] if author else "") or ""
     norm = resolver.strip().casefold()
-    for who in (author_model, implementer_model or ""):
+    implementers = [implementer_model] if isinstance(implementer_model, str) or implementer_model is None \
+        else list(implementer_model)
+    for who in (author_model, *[m or "" for m in implementers]):
         if who.strip() and norm == who.strip().casefold():
             raise ValueError("resolver: must be independent of the check author and the implementer")
     if outcome == "requirement_amended" and not resolver.startswith("human:"):

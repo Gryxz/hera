@@ -4,7 +4,7 @@ A coordinator that gets coding tasks done by AI models and only calls them done 
 
 Private project for a group of four. Each member runs their own copy.
 
-> **Status: milestone 0.1, step 8b of 10 is built (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox, the acceptance oracle: checks, frozen check store, pytest adapter, contract checks, check validation, diff audit, verification receipts, verdicts, attribution, redacted feedback and disputes, the implementer loop with resume, and now the task orchestrator: the recovery ladder as a pure state machine, privacy routing before any call, a decision log that lets a task resume at any point, and `hera checks freeze`, `hera run` and `hera task status`); S5 (local model host) is deferred until someone has a Mac, and S4, S7c and S8b are pending review.** The in-process tamper route is closed for contract checks (declarative checks run out of process, compared by the oracle) and still open for native pytest checks: a candidate that monkeypatches pytest gets a false `PASS` from a pytest-only check set (documented, tested; `in_process_only` in the verify outcome shows which requirements rest only on such checks; see docs/ORACLE.md). Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can open a network connection and the provider adapters, the agent loop and the orchestrator are exercised against loopback mock servers only. Next up is step S9 (per-attempt learning-ledger fields and an `UNKNOWN`-rate report); the S10 pilot needs a real provider account and real tasks. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+> **Status: milestone 0.1, step 9 of 10 is built (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox, the acceptance oracle: checks, frozen check store, pytest adapter, contract checks, check validation, diff audit, verification receipts, verdicts, attribution, redacted feedback and disputes, the implementer loop with resume, the task orchestrator with the recovery ladder, privacy routing before any call and a decision log that lets a task resume at any point, and now continuing a stopped task (`hera task continue`), resolving disputes from the command line (`hera dispute list/resolve`) and the learning ledger with its report (`hera report`: pass rates, the `UNKNOWN` rate, dollars per verified task)); S5 (local model host) is deferred until someone has a Mac, its testable part is S5b, and S4, S7c and S9 are pending review.** The in-process tamper route is closed for contract checks (declarative checks run out of process, compared by the oracle) and still open for native pytest checks: a candidate that monkeypatches pytest gets a false `PASS` from a pytest-only check set (documented, tested; `in_process_only` in the verify outcome shows which requirements rest only on such checks; see docs/ORACLE.md). Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can open a network connection and the provider adapters, the agent loop and the orchestrator are exercised against loopback mock servers only. Personal and proprietary repositories run local-only in `hera run` by design (see docs/AGENT.md). Next up is step S10 (the pilot), which needs a provider key and real tasks; S5b (the local model host supervisor against a fake model process) needs no key. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ---
 
@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 842 tests; 10 skip where no sandbox mechanism is available
+pytest -q                       # 946 tests; 10 skip where no sandbox mechanism is available
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -96,15 +96,16 @@ Around that loop:
 | `src/hera/agent/prompts.py` | The implementer's fixed rules and first messages | done |
 | `src/hera/agent/loop.py` | `run_attempt`: the tool loop, per-turn records (`attempts`, `turns`), resume without repeated requests, end statuses | done (mock providers only) |
 | `src/hera/agent/policy.py` | The recovery ladder H-R1 as a pure state machine (`decide`): rungs, retry rules, limits and thresholds as data; see `docs/AGENT.md` | done (mock providers only) |
-| `src/hera/agent/orchestrator.py` | `run_task`: attempts, verification of every submitted candidate, ladder decisions, disputes, privacy routing before any call, the `task_events` log and resume at any point | done (mock providers only) |
+| `src/hera/agent/orchestrator.py` | `run_task`: attempts, verification of every submitted candidate, ladder decisions, disputes, privacy routing before any call, the `task_events` log and resume at any point; `continue_task`: continue a task stopped by a cap, a provider error or a resolved dispute | done (mock providers only) |
+| `src/hera/report.py` | The learning ledger: one record per finished attempt joined from stored data (no schema change), the summary and its text; every rate with its counts and `(n<5)` below five observations | done |
 | `src/hera/types.py` | Shared data types and enums | done |
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
-| `src/hera/cli.py` | `hera init`, `hera status`, `hera verify`, `hera providers list`, `hera providers check <name>`, `hera checks freeze`, `hera run`, `hera task status` | done |
+| `src/hera/cli.py` | `hera init`, `hera status`, `hera verify`, `hera providers list`, `hera providers check <name>`, `hera checks freeze`, `hera run`, `hera task status`, `hera task continue`, `hera dispute list`, `hera dispute resolve`, `hera report` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks and an invented toy project (`toyrepo.py`) | 842 (10 need a sandbox mechanism) |
+| `tests/` | One test file per module, plus portability checks and an invented toy project (`toyrepo.py`) | 946 (10 need a sandbox mechanism) |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
-Not built yet: local model host, check authoring by models, requirements approval screen, the attribution learning ledger and `UNKNOWN`-rate report (S9).
+Not built yet: local model host (S5; S5b is its testable part), check authoring by models, requirements approval screen, a path for remote models to help on personal or proprietary repositories through approved sanitised descriptions.
 
 ## Rules — please do not break these
 
@@ -137,21 +138,19 @@ No real provider call has been made yet. When a member has an account, this is t
 3. Run `hera providers check <name>`. It sends the fixed prompt "Reply with the single word: ready" through the gateway and prints the reply, the tokens and the dollars; exit status 0 means it worked. Then `hera status` shows the call and its cost.
 4. Write a spec by hand, with the requirements and the checks (visible and hidden), see the walkthrough in `docs/AGENT.md`, and run `hera checks freeze --task TASK --repo /path/to/repo --spec spec.toml`. It runs the checks on the base commit, refuses to freeze checks that are flaky or invalid, and prints the check-set hash.
 5. Run `hera run --task TASK --checkset HASH --objective "what you want done" --max-usd 1`. It prints each event as it happens (the routing decision, every attempt, every verification, the ladder's decisions) and ends with the status, the verdict and the dollars. Exit 0 means `PASSED`; 3 means any other final status (`FAILED`, `BUDGET_CENSORED`, `BLOCKED_PRIVACY`, ...).
-6. `hera task status TASK` shows the events again at any time. A task that was interrupted continues from where it stopped when you run the same `hera run` command again.
+6. `hera task status TASK` shows the events again at any time. A task that was interrupted continues from where it stopped when you run the same `hera run` command again. A task that stopped as `BUDGET_CENSORED`, `PROVIDER_ERROR` or (once `hera dispute resolve` closed the dispute) `AWAITING_DISPUTE` goes on with `hera task continue TASK [--max-usd X]`; `hera report` shows the learning ledger.
 
 Expect to fix small wire-format differences on this first call, especially for tool calls (see `docs/AGENT.md`).
 
-## Next step: S9 — learning-ledger fields and an `UNKNOWN`-rate report
+## Next step: S10 (the pilot), or S5b if you have no key
 
-Built through S8b: the implementer loop (`run_attempt`), the orchestrator with the recovery ladder (retry, diagnosis, escalation, a fresh candidate after `OVERFIT` or `TAMPER`, disputes filed, privacy routing first, a budget cap ends a task as budget-censored) and the CLI around it. Much of S9 already exists from S7b (ten attribution labels by deterministic rules, one attribution per verification, the model identifier on every ledger record). What is left:
-- One learning-ledger record per finished attempt: tier, provider, model, rung, verdict, attribution, dollars and turns, in one table.
-- A report of the share of attempts attributed `UNKNOWN`.
+Built through S9: the implementer loop, the orchestrator with the recovery ladder and `hera run`, continuing a stopped task (`hera task continue`), disputes from the command line (`hera dispute`), and the learning ledger (`hera report`). Nothing has met a real model yet, and nothing in S8b or S9 is meaningful until one real call has been made.
 
-Then S10 (the pilot: eight gold tasks, bare loop against the HERA loop). It needs a real provider account and real tasks, and it is where the whole design is first measured; nothing in S8b is meaningful until one real call has been made.
+**S10 needs a provider key and real tasks.** The walkthrough is "First real call" above: put one provider in `hera.toml` (`kind`, `url`, the exact dated `model`, `tier`, `key_env`), export the key in your shell, `hera providers list` then `hera providers check <name>`, write a spec by hand for a small task from a public repository (listed as `public` in the policy) and `hera checks freeze`, then `hera run`. Eight gold tasks, run with the bare loop and with the HERA loop, then `hera report`: the pilot measures the false-pass rate, dollars per verified task and the `UNKNOWN` rate, and ends with the gate on whether to go on to 0.2. Expect to fix small wire-format differences on the first real call, especially for tool calls.
+
+**S5b needs no key.** The local model host supervisor (start, stop, memory limit, kill-to-evict, reload, health and restart rules) can be built and tested against a fake model process on 127.0.0.1; only the real 9B model and the Mac memory measurement wait for a Mac (S5).
 
 Still open from S7b/S7c: requirements summary and approval screen (terminal); two blind check authors; author hidden checks as contract checks wherever the task has an external surface (check authoring by models is not built; members write checks by hand with `hera checks freeze` until then).
-
-S5 (local model host) is deferred: its Mac part needs a Mac to run and test.
 
 ## Known gaps and honest caveats
 

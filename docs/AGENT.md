@@ -1,9 +1,11 @@
 # Implementer loop (S8a) and task orchestrator (S8b)
 
 Code: `src/hera/agent/{tools,prompts,loop,policy,orchestrator}.py`, `src/hera/providers/registry.py`,
-`src/hera/cli.py`. Tests: `tests/test_agent_tools.py`, `tests/test_agent_loop.py`,
+`src/hera/report.py`, `src/hera/cli.py`. Tests: `tests/test_agent_tools.py`, `tests/test_agent_loop.py`,
 `tests/test_provider_toolcalls.py`, `tests/test_registry.py`, `tests/test_policy_ladder.py`,
-`tests/test_orchestrator.py`, `tests/test_cli_run.py` (helper `tests/scripted_llm.py`).
+`tests/test_orchestrator.py`, `tests/test_cli_run.py`, `tests/test_continue.py`,
+`tests/test_cli_continue.py`, `tests/test_dispute_cli.py`, `tests/test_report.py` (helper
+`tests/scripted_llm.py`).
 
 **Nothing here has talked to a real model.** Every test runs against a 127.0.0.1 server that plays a
 script of replies in the OpenAI-compatible or the Anthropic wire format. Expect small differences on
@@ -157,7 +159,8 @@ it routes local-only; the gateway still checks every message again.
 `task_events(task_id, seq, at, kind, detail_json)`; kinds: `routing`, `fresh_candidate`, `retry`,
 `escalate` (each a plan for the next attempt), `attempt_started`, `attempt_ended`, `verified` (receipt
 id, verdict, failing check ids, the feedback that was or would be sent), `diagnosis` (the text, or why
-it was skipped), `dispute_filed`, `dispute_rejected`, `stopped` (final status). `tasks.status` follows.
+it was skipped), `dispute_filed`, `dispute_rejected`, `stopped` (final status), `continued` (see
+"Continuing a stopped task"). `tasks.status` follows.
 
 A decision is never stored on its own. `run_task` folds the log: the ladder state comes from
 replaying the logged outcomes through `policy.decide`, so the next step is a function of the log. A
@@ -165,9 +168,105 @@ crash then continues like this: mid-attempt, `run_attempt` resumes the open atte
 turn, nothing repeated); after the submit but before the verification, the candidate is verified once;
 after the verification, the stored verdict and feedback are used (no second verification) and the
 decision is recomputed; after a plan or a diagnosis, the plan is carried out. A task that has
-stopped is returned as stored (start a new task id to run it again: a stop for `BUDGET_CENSORED` or
-`AWAITING_DISPUTE` is not continued automatically). The window in which a paid call can still be
+stopped is returned as stored by `run_task` and `hera run`; only `continue_task` / `hera task continue`
+goes on after a stop, and only for the stops listed below. The window in which a paid call can still be
 repeated is the one described above, for the diagnosis call as for a turn.
+
+## Privacy of personal and proprietary repositories: local-only by design
+
+In `hera run`, a repository whose class is personal or proprietary is routed to a local provider only.
+This is a design decision, not a missing feature. The user's privacy rule binds an approval to the
+exact content hash it was given for, a destination and an expiry. An implementer changes the content
+on every turn (its own edits, tool results that quote them, the model's replies), so no approval
+given beforehand can cover an agent loop: the text that would be sent does not exist yet when the
+approval would have to be made. Without a local provider such a task ends `BLOCKED_PRIVACY` before any
+request. A remote model can help on such a repository only through descriptions that a person has read,
+sanitised and approved as `declassified` (the mechanism exists in the gateway); building that path into
+the orchestrator is not done yet.
+
+## Continuing a stopped task
+
+`continue_task(conn, task_id, spec=, providers=, policy=, max_usd=None, on_event=None)` and
+`hera task continue ID [--max-usd X] [--allow-unsandboxed]` go on after a stop that a person or the
+clock can have changed. Every other stop (`PASSED`, `FAILED`, `NEEDS_HUMAN`, `BLOCKED_PRIVACY`) is
+refused with a message and exit 3; nothing is logged and nothing is sent. So is a stop that still has
+no room (below), and a task that has not stopped (`hera run` resumes those). The continuation is one
+`continued` event appended after the `stopped` event: the log is append-only, nothing is rewritten.
+`run_task` folds the log as before, so a continuation resumes like any run; continuing, crashing and
+continuing again repeats no request (`tests/test_continue.py` checks the request bodies).
+
+Caps fail closed. `--max-usd` must be a finite amount above 0, and budget caps and prices in
+`hera.toml` must be finite and at least 0 (fractions between 0 and 1): every comparison with NaN is
+false, so `nan` (which TOML accepts) would otherwise switch a cap off. The ledger also refuses a NaN
+or negative call estimate. Every provider of a task must share one ledger and one gateway, because
+a continuation's cap is applied to the ledger the task uses. `--max-usd` given to a continuation is
+recorded in the `continued` event whatever the stop was, so an interrupted continuation resumes
+under the same cap.
+
+| Stopped as | When it can continue | What happens |
+|---|---|---|
+| `BUDGET_CENSORED` | The ledger would allow a call now (checked before anything is logged; if not, the message names the cap and the exit is 3). `--max-usd X` replaces the per-task cap for this continuation only and is recorded in the `continued` event; a continuation that is interrupted resumes under that cap, then it is gone. | An attempt that was cut off goes on as a new attempt on the same candidate, in the same conversation, with a fixed "continued" message (no message if the cut-off attempt had never been answered). It does not use up a retry. If the diagnosis call was what the cap refused, the diagnosis is asked again. |
+| `AWAITING_DISPUTE` | Only once the dispute is resolved (`hera dispute resolve`); an open dispute refuses. A resolved dispute is used once. | `upheld`: the candidate that disputed gets one retry, told "your dispute was reviewed and the check stands" and to keep working; the ladder then goes on as usual. `check_amended`: the task's check set becomes the new one recorded on the dispute (named in the `continued` event), the last candidate is verified again against it and the ladder goes on from that verdict. `requirement_amended`: the task stops again as `NEEDS_HUMAN`, reason "requirement changed: start a new task". A dispute that was opened outside the run (the verdict was `ORACLE_DISPUTED`, no candidate filed it) is handled like `check_amended` with the same check set: the candidate is verified again. |
+| `PROVIDER_ERROR` | A provider for the next rung exists and its destination is permitted for the repository now. | The ladder moves to the next rung it would have used (a fresh candidate on `default_alt`, else the escalation). If no rung is left it refuses. A diagnosis call that failed twice goes on without the diagnosis. |
+
+The routing decision is not recomputed: a provider added after the stop is used only for the rung
+the logged routing already allows.
+
+## Disputes
+
+An implementer can dispute a VISIBLE check (`dispute` tool); the orchestrator files it and the task
+waits as `AWAITING_DISPUTE`. A person resolves it:
+
+- `hera dispute list [--open]`: id, task, check id, requirement, status, opened time (UTC) and the first
+  200 characters of the argument on a line of its own (the argument is model text: shown as one line of
+  printable characters). Resolved disputes also show the outcome and the resolver.
+- `hera dispute resolve ID --outcome upheld|check_amended|requirement_amended --resolver human:<name>
+  [--new-checkset HASH]`. From the command line the resolver must be a person (`human:` and a name).
+  `oracle.disputes.resolve_dispute` still applies its independence rule: the resolver may not be the
+  check's author model or any model that implemented the task (the models in the task's `attempts`
+  rows are all passed). `check_amended` needs the hash of a check set already frozen
+  (`hera checks freeze`) for the same task and different from the disputed one; the new set is
+  recorded as superseding the old. Refusals (not a person, unknown dispute, already resolved, unknown
+  or foreign hash, a hash with an outcome other than `check_amended`) exit 2 and change nothing.
+
+Then `hera task continue TASK` (above).
+
+## Reading the report
+
+`hera report [--since YYYY-MM-DD] [--task ID] [--json]` prints the learning ledger: one record per
+finished attempt (`report.attempt_records`), joined from `attempts`, `turns`, `task_events`,
+`receipts`, `verdicts`, `attributions` and `model_calls`; nothing in a record is model text. `--json`
+prints the summary and every record. Nothing is stored separately: it is recomputed on every call.
+
+- **Rates** are `passed/total (percent)`, always with the counts, and marked `(n<5)` when the total
+  is below five. A rate over three attempts is an anecdote; the mark is there so nobody reads it as a
+  measurement. Dollar averages carry the mark when they average fewer than five tasks.
+- **Pass rate per tier and per model** counts every finished attempt; an attempt that never reached a
+  verification (cap, privacy block, provider error, out of turns) counts as not passed. The
+  **first-attempt pass rate** looks at attempt 1 of each task only, which is what a user of a single
+  model would have got.
+- **Verdicts** are the oracle's; attempts that ended without one are listed by their end status.
+- **Attribution** covers verdicts other than `PASS` (a pass has none). The **`UNKNOWN` rate** is the
+  share of those the deterministic rules could not explain; it is the number to watch, because every
+  `UNKNOWN` is a failure HERA cannot learn from. Attempts that never reached a verification have no
+  attribution at all and are counted apart.
+- **Dollars**: the total is the sum of the cost ledger over the tasks in the report; per task is that
+  divided by the number of tasks; **per verified task** divides the same total by the tasks that have a
+  `PASS` reached with a sandbox, so the cost of everything that failed is paid for by the passes. A
+  `PASS` without a sandbox is not "verified": a hostile candidate could have tampered with it.
+- **Passes resting only on in-process checks**: a pytest-only check set can be forged by a candidate
+  that patches pytest, so a pass whose requirements rest on such checks alone is weaker. **Verdicts
+  reached without a sandbox** is the same warning for isolation.
+- **Changes outside the declared scope** counts verified attempts whose stored audit flagged a changed
+  path outside the scope the implementer declared.
+- **Retries** are attempts that continued a candidate with feedback; "succeeded" passed, "failed"
+  reached a verdict that was not a pass. **Diagnosis**: calls, their dollars and how often the next
+  candidate (told the diagnosis) passed. **Escalations**: strong-tier candidates and how often they
+  passed. The last line says how often an attempt that did not pass was followed by a pass on the same
+  task.
+
+All of these are small numbers until the pilot (S10): read them as a check that the ledger works, not
+as conclusions.
 
 ## Walkthrough: from a spec to a verdict
 
@@ -199,3 +298,5 @@ repeated is the one described above, for the diagnosis call as for a turn.
    unsandboxed notes of the last verification. Exit 0 for `PASSED`, 3 for any other final status, 2 for
    a configuration error (no provider for the default tier, unknown check set, no configuration).
 5. `hera task status T` prints the events and the current status.
+6. `hera task continue T [--max-usd X]` after a stop that can continue; `hera dispute list|resolve`
+   for disputes; `hera report` for the ledger (all described above).
