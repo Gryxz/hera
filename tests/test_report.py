@@ -263,6 +263,21 @@ def test_running_attempts_have_no_record_and_attempts_without_a_log_still_do(con
     assert s["verdicts"]["not_verified"] == {"budget_censored": 1} and s["attribution"]["not_attributed"]["not verified"] == 1
 
 
+def test_a_transport_error_estimate_counts_in_task_dollars_but_is_not_a_diagnosis(conn):
+    conn.execute("INSERT INTO attempts(id,task_id,seq,tier,provider,model_id,candidate,status,started_at,ended_at) "
+                 "VALUES('x-a1','x',1,'cheap','p','m1','x-c1','budget_censored',1.0,2.0)")
+    conn.execute("INSERT INTO turns(attempt_id,seq,request_sha256,usd) VALUES('x-a1',1,'h',0.25)")
+    for purpose, usd in (("implement", 0.25), ("diagnose:transport_error:estimated", 0.5),
+                         ("implement:transport_error:estimated", 0.125)):
+        conn.execute("INSERT INTO model_calls(at,task_id,purpose,destination,tier,model_id,input_tokens,"
+                     "output_tokens,cache_read_tokens,cache_write_tokens,usd) VALUES(1.0,'x',?,'p','cheap','m1',"
+                     "0,0,0,0,?)", (purpose, usd))
+    (r,) = report.attempt_records(conn)
+    assert r.task_usd == pytest.approx(0.875)
+    assert r.diagnosis_calls == 0 and r.diagnosis_usd == 0 and r.usd == 0.25
+    report.render_summary(report.summary([r]))                  # does not crash
+
+
 def test_a_verdict_counts_as_sandboxed_only_if_every_runner_was_and_the_receipt_says_so():
     u = report._unsandboxed
     assert u({"mechanism": "bwrap"}) is False
