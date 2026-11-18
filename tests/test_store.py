@@ -99,7 +99,7 @@ def test_v4_store_migrates_to_v5_and_gets_task_events(tmp_path):
     assert not raw.execute("SELECT name FROM sqlite_master WHERE name='task_events'").fetchall()
     raw.close()
     c = db.connect(p)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 5 == db.SCHEMA_VERSION
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 6 == db.SCHEMA_VERSION    # connect() migrates all the way up
     assert [r[1] for r in c.execute("PRAGMA table_info(task_events)")] == [
         "task_id", "seq", "at", "kind", "detail_json"]
     assert c.execute("SELECT text FROM requirements WHERE id='t:R-1'").fetchone()[0] == "x"     # data kept
@@ -111,3 +111,44 @@ def test_v4_store_migrates_to_v5_and_gets_task_events(tmp_path):
         c.execute("INSERT INTO task_events(task_id,seq,at,kind,detail_json) VALUES('t',2,2.0,NULL,'{}')")
     c.close()
     db.connect(p).close()                                         # reopening does nothing further
+
+
+def test_v5_store_migrates_to_v6_and_gets_summaries_and_the_checkset_column(tmp_path):
+    import sqlite3
+    import pytest
+    p = tmp_path / "v5.sqlite"
+    c = db.connect(p)
+    c.execute("INSERT INTO checksets(hash,task_id,runner_cmd,manifest_json,frozen_at) VALUES('h1','t','pytest','{}',1)")
+    # step back to a genuine v5 store: no summary tables (their triggers go with them), no checksets.summary_hash
+    c.executescript("DROP TABLE summary_decisions; DROP TABLE summaries; "
+                    "ALTER TABLE checksets DROP COLUMN summary_hash; PRAGMA user_version=5;")
+    c.close()
+    raw = sqlite3.connect(p)
+    assert not raw.execute("SELECT name FROM sqlite_master WHERE name LIKE 'summar%'").fetchall()
+    assert "summary_hash" not in [r[1] for r in raw.execute("PRAGMA table_info(checksets)")]
+    raw.close()
+    c = db.connect(p)
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 6 == db.SCHEMA_VERSION
+    assert [r[1] for r in c.execute("PRAGMA table_info(summaries)")] == ["hash", "task_id", "summary_json", "created_at"]
+    assert [r[1] for r in c.execute("PRAGMA table_info(summary_decisions)")] == [
+        "id", "summary_hash", "decision", "decider", "note", "may_leave_machine", "decided_at"]
+    assert c.execute("SELECT hash, summary_hash FROM checksets").fetchone()[:] == ("h1", None)   # data kept, no summary
+    c.execute("INSERT INTO summaries(hash,task_id,summary_json,created_at) VALUES('s','t','{}',1)")
+    c.execute("INSERT INTO summary_decisions(summary_hash,decision,decider,may_leave_machine,decided_at) "
+              "VALUES('s','approved','human:a',0,1)")
+    with pytest.raises(sqlite3.IntegrityError):                  # an approval carries the flag, a rejection does not
+        c.execute("INSERT INTO summary_decisions(summary_hash,decision,decider,decided_at) VALUES('s','approved','human:a',1)")
+    with pytest.raises(sqlite3.IntegrityError):
+        c.execute("INSERT INTO summary_decisions(summary_hash,decision,decider,may_leave_machine,decided_at) "
+                  "VALUES('s','rejected','human:a',1,1)")
+    with pytest.raises(sqlite3.IntegrityError):                  # only approved or rejected
+        c.execute("INSERT INTO summary_decisions(summary_hash,decision,decider,decided_at) VALUES('s','maybe','h',1)")
+    with pytest.raises(sqlite3.IntegrityError):                  # a decision needs its summary
+        c.execute("INSERT INTO summary_decisions(summary_hash,decision,decider,may_leave_machine,decided_at) "
+                  "VALUES('nope','approved','human:a',0,1)")
+    with pytest.raises(sqlite3.IntegrityError):                  # immutable and append-only
+        c.execute("UPDATE summaries SET task_id='x'")
+    with pytest.raises(sqlite3.IntegrityError):
+        c.execute("DELETE FROM summary_decisions")
+    c.close()
+    db.connect(p).close()                                        # reopening does nothing further

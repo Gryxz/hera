@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -27,6 +28,9 @@ from ..workspace import _check_id
 from .contract import load_contract_file
 from .model import (CheckSet, DraftCheck, Requirement, checks_by_runner, validate_draft,  # noqa: F401
                     validate_relpath)
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class CheckStoreTampered(RuntimeError):
@@ -117,14 +121,21 @@ def _check_contract_file(rel: str, data: bytes, drafts: list[DraftCheck]) -> Non
 
 
 def freeze(conn: sqlite3.Connection, *, task_id: str, requirements, checks,
-           files: dict[str, bytes], adapter: str = "pytest", summary_text: str = "") -> CheckSet:
-    """Hash, write read-only and record a check set. Idempotent for identical content."""
+           files: dict[str, bytes], adapter: str = "pytest", summary_text: str = "",
+           summary_hash: str | None = None) -> CheckSet:
+    """Hash, write read-only and record a check set. Idempotent for identical content.
+
+    ``summary_text`` is part of the manifest (so of the check-set hash); ``hera checks freeze`` passes the
+    canonical text of the approved requirements summary. ``summary_hash`` is that summary's hash, stored
+    in ``checksets.summary_hash`` (NULL for check sets frozen before schema 6 or without a summary)."""
     _check_id(task_id, "task id")
     requirements, checks = tuple(requirements), tuple(checks)
     if not isinstance(adapter, str) or not adapter or not all(ch.isalnum() or ch in "_-" for ch in adapter):
         raise ValueError("adapter: must be a short identifier")
     if not isinstance(files, dict) or not all(isinstance(v, (bytes, bytearray)) for v in files.values()):
         raise ValueError("files: must map relpath to bytes")
+    if summary_hash is not None and (not isinstance(summary_hash, str) or not _SHA256.fullmatch(summary_hash)):
+        raise ValueError("summary_hash: must be 64 lowercase hexadecimal digits")
     validate_draft(requirements, checks)
     runner_of = {c.relpath: c.runner for c in checks}
     for rel in files:
@@ -170,19 +181,23 @@ def freeze(conn: sqlite3.Connection, *, task_id: str, requirements, checks,
         _chmod_readonly(root)
         verify_integrity(cs)
 
-    _record(conn, cs, manifest, doc)
+    _record(conn, cs, manifest, doc, summary_hash)
     return cs
 
 
-def _record(conn, cs: CheckSet, manifest: dict, doc: bytes) -> None:
+def _record(conn, cs: CheckSet, manifest: dict, doc: bytes, summary_hash: str | None = None) -> None:
     now = time.time()
     conn.execute("BEGIN IMMEDIATE")
     try:
         for r in cs.requirements:
             conn.execute("INSERT OR IGNORE INTO requirements(id, task_id, text, created_at) VALUES (?,?,?,?)",
                          (f"{cs.task_id}:{r.id}", cs.task_id, r.text, now))
-        conn.execute("INSERT OR IGNORE INTO checksets(hash, task_id, runner_cmd, manifest_json, frozen_at, supersedes)"
-                     " VALUES (?,?,?,?,?,NULL)", (cs.hash, cs.task_id, cs.adapter, doc.decode("ascii"), now))
+        conn.execute("INSERT OR IGNORE INTO checksets(hash, task_id, runner_cmd, manifest_json, frozen_at, supersedes,"
+                     " summary_hash) VALUES (?,?,?,?,?,NULL,?)",
+                     (cs.hash, cs.task_id, cs.adapter, doc.decode("ascii"), now, summary_hash))
+        if conn.execute("SELECT summary_hash IS NOT ? FROM checksets WHERE hash=?",
+                        (summary_hash, cs.hash)).fetchone()[0]:
+            raise ValueError("summary_hash: this check set is already recorded with a different summary")
         for c in cs.checks:
             conn.execute("INSERT OR IGNORE INTO checks(id, checkset_hash, requirement_id, kind, visibility, sha256,"
                          " author_model, author_role, health) VALUES (?,?,?,?,?,?,?,?,'valid')",
@@ -192,6 +207,13 @@ def _record(conn, cs: CheckSet, manifest: dict, doc: bytes) -> None:
     except BaseException:
         conn.execute("ROLLBACK")
         raise
+
+
+def summary_hash_of(conn: sqlite3.Connection, checkset_hash: str) -> str | None:
+    """Hash of the requirements summary a check set was frozen against, or None (frozen before schema 6,
+    or without one)."""
+    row = conn.execute("SELECT summary_hash FROM checksets WHERE hash=?", (checkset_hash,)).fetchone()
+    return row["summary_hash"] if row else None
 
 
 def load(conn: sqlite3.Connection, checkset_hash: str) -> CheckSet:

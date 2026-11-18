@@ -87,6 +87,7 @@ class TaskSpec:
     limits: RecoveryLimits = RecoveryLimits()
     rules: Rules = Rules()
     allow_unsandboxed: bool = False
+    summary: str | None = None      # recorded in the routing event: the approved summary's hash, or a note (set by the CLI)
 
 
 @dataclass(frozen=True)
@@ -403,6 +404,8 @@ class _Run:
     def route(self) -> dict:
         routing = compute_routing(self.roles, self.policy, self.spec.repo_id)
         routing["checkset_hash"] = self.spec.checkset.hash
+        if self.spec.summary is not None:
+            routing["summary"] = self.spec.summary
         self._emit("routing", routing)
         return routing
 

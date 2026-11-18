@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     cf.add_argument("--repo", required=True, help="path of the source repository (a local directory)")
     cf.add_argument("--spec", required=True, help="SPEC.toml with [[requirement]] and [[check]] tables")
     cf.add_argument("--base", help="base commit (full hash); default: the repository's HEAD")
+    cf.add_argument("--summary", required=True, metavar="HASH",
+                    help="hash of the approved requirements summary (`hera summary import`, `hera summary approve`)")
     cf.add_argument("--skip-validation", action="store_true", help="freeze without validating on the base commit")
     cf.add_argument("--allow-unsandboxed", action="store_true",
                     help="run with NO network or filesystem isolation if no sandbox mechanism exists")
@@ -46,8 +48,30 @@ def main(argv: list[str] | None = None) -> int:
     rn.add_argument("--checkset", required=True, help="check-set hash printed by `hera checks freeze`")
     rn.add_argument("--objective", required=True)
     rn.add_argument("--max-usd", type=_usd, help="per-task dollar cap (default: the budget in hera.toml)")
+    rn.add_argument("--without-approved-summary", action="store_true",
+                    help="run although the check set has no approved requirements summary (recorded in the "
+                         "task's routing event)")
     rn.add_argument("--allow-unsandboxed", action="store_true",
                     help="run with NO network or filesystem isolation if no sandbox mechanism exists")
+    sm = sub.add_parser("summary", help="the requirements summary: import, show, approve, reject, list")
+    smsub = sm.add_subparsers(dest="scmd", required=True)
+    si = smsub.add_parser("import", help="read a SUMMARY.toml, store it under its hash and show the screen")
+    si.add_argument("file")
+    ss = smsub.add_parser("show", help="show the screen of a summary (by hash, or the task's latest)")
+    ss.add_argument("hash", nargs="?")
+    ss.add_argument("--task", help="the latest summary imported for this task")
+    ss.add_argument("--full", action="store_true", help="wrap long lines instead of cutting them")
+    sa = smsub.add_parser("approve", help="approve a summary (a human decides; refused while a question is unanswered)")
+    sa.add_argument("hash")
+    sa.add_argument("--by", required=True, help="who decides: human:<name>")
+    sa.add_argument("--may-leave-machine", required=True, choices=["yes", "no"],
+                    help="may this text leave the machine? Recorded only; nothing uses it yet")
+    sj = smsub.add_parser("reject", help="reject a summary, with a note")
+    sj.add_argument("hash")
+    sj.add_argument("--by", required=True, help="who decides: human:<name>")
+    sj.add_argument("--note", required=True)
+    sl = smsub.add_parser("list", help="hash, task, state and decider of every summary")
+    sl.add_argument("--task")
     tk = sub.add_parser("task", help="inspect a task")
     tksub = tk.add_subparsers(dest="tcmd", required=True)
     ts = tksub.add_parser("status", help="show a task's events and its current status")
@@ -95,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
         return _checks_freeze(a)
     if a.cmd == "run":
         return _run(a)
+    if a.cmd == "summary":
+        return _summary(a)
     if a.cmd == "task":
         return _task_continue(a) if a.tcmd == "continue" else _task_status(a)
     if a.cmd == "dispute":
@@ -213,6 +239,9 @@ def format_event(ev: dict) -> str:
         if d.get("blocked"):
             return "routing: no provider is permitted for this repository; nothing was sent"
         extra = f", skipped rungs: {', '.join(d['skipped_rungs'])}" if d.get("skipped_rungs") else ""
+        if d.get("summary"):
+            sm = str(d["summary"])
+            extra += ", summary " + (sm[:12] if len(sm) == 64 else _clean(sm, 40))
         return f"routing: implementer runs on `{d['impl']}` (repository class {d['repo_class']}){extra}"
     if k == "attempt_started":
         return (f"attempt {d['attempt']} started: candidate {d['candidate']} on `{d['provider_key']}` "
@@ -291,6 +320,7 @@ def _checks_freeze(a) -> int:
     from pathlib import Path
     from .oracle import checkstore
     from .oracle.adapters.pytest_adapter import PytestAdapter
+    from .oracle.summary import approved_summary_for, canonical_json, requirement_diff
     from .oracle.validation import validate_on_base
     from .privacy.policy import load_policy
     from .workspace import TaskRepo, _rm_tree
@@ -304,6 +334,11 @@ def _checks_freeze(a) -> int:
     try:
         try:
             reqs, checks, files = _read_spec(a.spec)
+            summary = approved_summary_for(conn, a.task, a.summary)
+            differing = requirement_diff(summary, reqs)
+            if differing:
+                raise ValueError("the approved summary and the spec disagree on requirement(s) "
+                                 + ", ".join(differing) + " (ids and texts must be exactly equal)")
             try:
                 repo = TaskRepo.open(a.task)
                 if a.base and a.base.lower() != repo.base_commit:
@@ -342,7 +377,8 @@ def _checks_freeze(a) -> int:
                     pass
             if scratch_home:
                 _rm_tree(Path(scratch_home))
-        cs = checkstore.freeze(conn, task_id=a.task, requirements=reqs, checks=checks, files=files)
+        cs = checkstore.freeze(conn, task_id=a.task, requirements=reqs, checks=checks, files=files,
+                               summary_text=canonical_json(summary), summary_hash=a.summary.lower())
         policy = load_policy(paths.policy_dir() / "policy.toml")
         repo_id = policy.repo_for_path(a.repo) or ""
         conn.execute("INSERT OR IGNORE INTO tasks(id, repo_id, objective, status, created_at, updated_at) "
@@ -359,6 +395,7 @@ def _checks_freeze(a) -> int:
     if not repo_id:
         print("note: the repository is not in the privacy policy, so it counts as sensitive and "
               "no remote provider will be used for it")
+    print(f"summary: {a.summary.lower()[:12]} (approved)")
     print(f"check-set hash: {cs.hash}")
     return 0
 
@@ -368,7 +405,7 @@ def _run(a) -> int:
     import dataclasses
     import os
     from . import config
-    from .agent.orchestrator import TaskConfigError, TaskSpec, run_task, select_roles
+    from .agent.orchestrator import TaskConfigError, TaskSpec, load_events, run_task, select_roles
     from .ledger import Ledger
     from .oracle import checkstore
     from .privacy.gateway import Gateway
@@ -399,6 +436,15 @@ def _run(a) -> int:
         if cs.task_id != a.task:
             print("error: that check set belongs to a different task", file=sys.stderr)
             return 2
+        earlier = next((e["detail"].get("checkset_hash") for e in load_events(conn, a.task)
+                        if e["kind"] == "routing"), None)
+        if earlier and earlier != cs.hash:
+            print("error: this task ran against another check set; after an amended check use "
+                  "`hera task continue`; otherwise start a new task id", file=sys.stderr)
+            return 2
+        summary_note = _summary_for_run(conn, cs, a.without_approved_summary)
+        if summary_note is None:
+            return 2
         row = conn.execute("SELECT repo_id FROM tasks WHERE id=?", (a.task,)).fetchone()
         repo_id = (row["repo_id"] if row else "") or ""
         policy = load_policy(paths.policy_dir() / "policy.toml")
@@ -416,7 +462,7 @@ def _run(a) -> int:
         repo = TaskRepo.open(a.task)
         spec = TaskSpec(task_id=a.task, repo=repo, base_commit=repo.base_commit, checkset=cs,
                         objective=a.objective, repo_id=repo_id, limits=cfg.recovery,
-                        allow_unsandboxed=a.allow_unsandboxed)
+                        allow_unsandboxed=a.allow_unsandboxed, summary=summary_note)
         out = run_task(conn, spec, providers=built, policy=policy,
                        on_event=lambda ev: print(f"[{ev['seq']}] {format_event(ev)}", flush=True))
     except (TaskConfigError, FileNotFoundError) as e:
@@ -429,6 +475,30 @@ def _run(a) -> int:
         _evict_host(host)
         conn.close()
     return _print_outcome(out)
+
+
+def _summary_for_run(conn, cs, override: bool):
+    """What `hera run` records about the requirements summary: its hash when the check set was frozen
+    against an approved one (and it still is), else "not approved (override)" when the person passed
+    --without-approved-summary. Otherwise prints how to fix it and returns None."""
+    from .oracle import checkstore
+    from .oracle.summary import approved_summary_for
+    sh = checkstore.summary_hash_of(conn, cs.hash)
+    try:
+        if sh is None:
+            raise ValueError("the check set was frozen without a requirements summary")
+        approved_summary_for(conn, cs.task_id, sh)
+        return sh
+    except ValueError as e:
+        if override:
+            return "not approved (override)"
+        fix = (f"approve it: `hera summary approve {sh} --by human:<name> --may-leave-machine yes|no`"
+               if sh else
+               "write a SUMMARY.toml, `hera summary import FILE`, `hera summary approve HASH --by human:<name> "
+               "--may-leave-machine yes|no`, then freeze again with `hera checks freeze ... --summary HASH`")
+        print(f"error: no approved requirements summary for this check set ({e}). To fix: {fix}. "
+              "To run anyway: --without-approved-summary (recorded in the task's log).", file=sys.stderr)
+        return None
 
 
 def _print_outcome(out) -> int:
@@ -700,6 +770,69 @@ def _report(a) -> int:
     return 0
 
 
+def _summary(a) -> int:
+    """`hera summary import|show|approve|reject|list`. Exit 0 on success, 2 for an error or a refusal
+    (nothing is recorded then)."""
+    from .oracle import summary as sm
+    conn = _open_db()
+    if conn is None:
+        return 2
+    try:
+        try:
+            if a.scmd == "import":
+                s = sm.load_summary(a.file)
+                h = sm.import_summary(conn, s)
+                print(f"summary hash: {h}")
+                print(sm.render(s, sm.state(conn, h)[1]))
+            elif a.scmd == "show":
+                if bool(a.hash) == bool(a.task):
+                    raise ValueError("give a summary hash or --task ID, not both and not neither")
+                h = a.hash or sm.latest_for_task(conn, a.task)
+                if h is None:
+                    raise ValueError("no summary has been imported for that task")
+                print(sm.render(sm.get_summary(conn, h), sm.state(conn, h)[1], full=a.full))
+            elif a.scmd == "approve":
+                d = sm.decide(conn, a.hash, sm.APPROVED, a.by, may_leave_machine=(a.may_leave_machine == "yes"))
+                print(f"approved {d.summary_hash} by {d.decider}; text may leave the machine: "
+                      f"{'yes' if d.may_leave_machine else 'no'}")
+            elif a.scmd == "reject":
+                d = sm.decide(conn, a.hash, sm.REJECTED, a.by, note=a.note)
+                print(f"rejected {d.summary_hash} by {d.decider}")
+            else:
+                rows = sm.list_summaries(conn, a.task)
+                if not rows:
+                    print("no summaries")
+                for r in rows:
+                    d = r["decision"]
+                    print(f"{r['hash']}  task={r['task_id']}  state={'not approved' if d is None else d.decision}"
+                          + ("" if d is None else f"  by={_clean(d.decider, 80)}") + f"  imported={_utc(r['created_at'])}")
+        except (ValueError, OSError) as e:
+            print(f"error: {e.args[0] if isinstance(e, ValueError) and e.args else e}", file=sys.stderr)
+            return 2
+    except Exception as e:
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    return 0
+
+
+def _task_summary_line(conn, task_id: str) -> str:
+    """`summary: <hash> <state>` for the check set the task currently uses."""
+    from .agent.orchestrator import task_checkset_hash
+    from .oracle import checkstore
+    from .oracle.summary import APPROVED, state
+    h = task_checkset_hash(conn, task_id)
+    sh = checkstore.summary_hash_of(conn, h) if h else None
+    if sh is None:
+        return "summary: none (the check set was frozen without a requirements summary)"
+    st, d = state(conn, sh)
+    if st == APPROVED:
+        return f"summary: {sh} approved by {_clean(d.decider, 80)} (text may leave the machine: " \
+               f"{'yes' if d.may_leave_machine else 'no'})"
+    return f"summary: {sh} NOT APPROVED ({'no decision yet' if st == 'none' else st})"
+
+
 def _task_status(a) -> int:
     from .agent.orchestrator import load_events
     conn = _open_db()
@@ -708,11 +841,13 @@ def _task_status(a) -> int:
     try:
         row = conn.execute("SELECT status FROM tasks WHERE id=?", (a.id,)).fetchone()
         events = load_events(conn, a.id)
+        summary_line = _task_summary_line(conn, a.id)
     finally:
         conn.close()
     if row is None and not events:
         print(f"error: no such task: {a.id}", file=sys.stderr)
         return 2
+    print(summary_line)
     for ev in events:
         print(f"[{ev['seq']}] {format_event(ev)}")
     print(f"status: {row['status'] if row else 'unknown'}")

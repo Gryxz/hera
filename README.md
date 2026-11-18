@@ -4,7 +4,7 @@ A coordinator that gets coding tasks done by AI models and only calls them done 
 
 Private project for a group of four. Each member runs their own copy.
 
-> **Status: milestone 0.1, step 9 of 10 is built (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox, the acceptance oracle: checks, frozen check store, pytest adapter, contract checks, check validation, diff audit, verification receipts, verdicts, attribution, redacted feedback and disputes, the implementer loop with resume, the task orchestrator with the recovery ladder, privacy routing before any call and a decision log that lets a task resume at any point, and now continuing a stopped task (`hera task continue`), resolving disputes from the command line (`hera dispute list/resolve`) and the learning ledger with its report (`hera report`: pass rates, the `UNKNOWN` rate, dollars per verified task)); S5b (the local model host supervisor, tested against a fake model process) is built; S5 (the real MLX worker and the Mac memory measurement) is deferred until someone has a Mac; S4, S5b, S7c and S9 are pending review.** The in-process tamper route is closed for contract checks (declarative checks run out of process, compared by the oracle) and still open for native pytest checks: a candidate that monkeypatches pytest gets a false `PASS` from a pytest-only check set (documented, tested; `in_process_only` in the verify outcome shows which requirements rest only on such checks; see docs/ORACLE.md). Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can send content over a network connection (the model host supervisor only probes 127.0.0.1) and the provider adapters, the agent loop and the orchestrator are exercised against loopback mock servers only. Personal and proprietary repositories run local-only in `hera run` by design (see docs/AGENT.md). Next up is step S10 (the pilot), which needs a provider key and real tasks. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+> **Status: milestone 0.1, step 9 of 10 is built (foundations, egress gateway and labeller, scanners v0, provider adapters, workspaces and sandbox, the acceptance oracle: checks, frozen check store, pytest adapter, contract checks, check validation, diff audit, verification receipts, verdicts, attribution, redacted feedback and disputes, the implementer loop with resume, the task orchestrator with the recovery ladder, privacy routing before any call and a decision log that lets a task resume at any point, and now continuing a stopped task (`hera task continue`), resolving disputes from the command line (`hera dispute list/resolve`) and the learning ledger with its report (`hera report`: pass rates, the `UNKNOWN` rate, dollars per verified task)); S5b (the local model host supervisor, tested against a fake model process) is built; S5 (the real MLX worker and the Mac memory measurement) is deferred until someone has a Mac; S4, S5b, S7c, S7d and S9 are pending review.** The in-process tamper route is closed for contract checks (declarative checks run out of process, compared by the oracle) and still open for native pytest checks: a candidate that monkeypatches pytest gets a false `PASS` from a pytest-only check set (documented, tested; `in_process_only` in the verify outcome shows which requirements rest only on such checks; see docs/ORACLE.md). Nothing here has called a real model or read a real repository yet; the egress gateway is the only code that can send content over a network connection (the model host supervisor only probes 127.0.0.1) and the provider adapters, the agent loop and the orchestrator are exercised against loopback mock servers only. Personal and proprietary repositories run local-only in `hera run` by design (see docs/AGENT.md). Next up is step S10 (the pilot), which needs a provider key and real tasks. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ---
 
@@ -23,7 +23,7 @@ git clone <repo url> && cd hera
 python -m venv .venv
 . .venv/bin/activate            # Windows: use WSL2, or .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                       # 1048 tests; 10 skip where no sandbox mechanism is available
+pytest -q                       # 1134 tests; 10 skip where no sandbox mechanism is available
 hera init                       # creates ~/.hera (or $HERA_HOME)
 hera status
 ```
@@ -91,6 +91,7 @@ Around that loop:
 | `src/hera/oracle/validation.py` | Validate a draft check set on the base commit (fail-before, stability) | done (no stub adversaries or mutation testing yet) |
 | `src/hera/oracle/audit.py` | Diff audit: protected paths, skip markers, declared scope, debris, dependency manifests, twin search; folds in what `prepare` undid | done |
 | `src/hera/oracle/verify.py` | Verify a commit: audit, pytest and contract check runs, regressions against the base-commit run of the project's own tests, receipt, verdict, attribution, persistence, redacted feedback, `in_process_only` | done (native pytest checks still forgeable in-process) |
+| `src/hera/oracle/summary.py` | Requirements summary: `SUMMARY.toml` parser with the design's limits, canonical hash, the one-screen render (40 lines of 100 columns), immutable summaries and append-only approvals (schema v6), including the recorded `may_leave_machine` control; see `docs/ORACLE.md` | done (the command line enforces approval; the library does not) |
 | `src/hera/oracle/disputes.py` | Disputes about visible checks; independent resolution; schema version 3 | done |
 | `src/hera/agent/tools.py` | The implementer's tools (files, literal search, sandboxed commands, visible checks, submit, dispute); path rules; every result labelled by the repository's class; see `docs/AGENT.md` | done (mock providers only) |
 | `src/hera/agent/prompts.py` | The implementer's fixed rules and first messages | done |
@@ -101,12 +102,12 @@ Around that loop:
 | `src/hera/modelhost.py` | Local model host supervisor: settings, context cap from memory, free-memory probes, one child process on 127.0.0.1 with lease, evict, health check, restart budget and event log; see `docs/MODELHOST.md` | done (fake model process only; the server is not sandboxed) |
 | `src/hera/types.py` | Shared data types and enums | done |
 | `src/hera/interfaces.py` | The replaceable boundaries: model provider, test adapter, gateway, worker, artefact store | defined, mostly unimplemented |
-| `src/hera/cli.py` | `hera init`, `hera status`, `hera verify`, `hera providers list`, `hera providers check <name>`, `hera checks freeze`, `hera run`, `hera task status`, `hera task continue`, `hera dispute list`, `hera dispute resolve`, `hera report`, `hera host status/start/stop/reset` | done |
+| `src/hera/cli.py` | `hera init`, `hera status`, `hera verify`, `hera providers list`, `hera providers check <name>`, `hera summary import/show/approve/reject/list`, `hera checks freeze`, `hera run`, `hera task status`, `hera task continue`, `hera dispute list`, `hera dispute resolve`, `hera report`, `hera host status/start/stop/reset` | done |
 | `config/*.example.toml` | Example settings and privacy policy | done |
-| `tests/` | One test file per module, plus portability checks, an invented toy project (`toyrepo.py`) and a fake model server (`fake_model_server.py`) | 1048 (10 need a sandbox mechanism) |
+| `tests/` | One test file per module, plus portability checks, an invented toy project (`toyrepo.py`) and a fake model server (`fake_model_server.py`) | 1134 (10 need a sandbox mechanism) |
 | `docs/BUILD_PLAN.md` | Order of work with "done when" for each step | current |
 
-Not built yet: the real local model worker and its Mac memory measurement (S5; the supervisor, S5b, is built), check authoring by models, requirements approval screen, a path for remote models to help on personal or proprietary repositories through approved sanitised descriptions.
+Not built yet: the real local model worker and its Mac memory measurement (S5; the supervisor, S5b, is built), check authoring by models (and a model that drafts the requirements summary), a path for remote models to help on personal or proprietary repositories through approved sanitised descriptions.
 
 ## Rules — please do not break these
 
@@ -130,6 +131,15 @@ Not built yet: the real local model worker and its Mac memory measurement (S5; t
 - Commit messages: what changed and why, in plain sentences.
 - One build-plan step per pull request where practical; update the step's status in `docs/BUILD_PLAN.md` in the same pull request.
 
+## How a task starts
+
+A task begins with a requirements summary a person approves, never with the checks:
+
+1. `hera summary import SUMMARY.toml` stores the summary under its hash and prints the one-screen text: outcomes, observable behaviour, constraints, assumptions, what cannot be verified automatically, what is out of scope, questions, and every requirement with its planned verification confidence (format in `docs/ORACLE.md`). To change anything, edit the file and import it again: a new hash, a new approval.
+2. `hera summary approve HASH --by human:<name> --may-leave-machine yes|no` (or `reject ... --note TEXT`). Approval is refused while a question has no answer; the yes/no on whether the text may leave the machine has no default and is only recorded for now.
+3. `hera checks freeze --task T --repo PATH --spec spec.toml --summary HASH` freezes the checks only against an approved summary of the same task whose requirements equal the spec's, and stores its hash with the check set.
+4. `hera run --task T --checkset H --objective "..."` refuses a check set without an approved summary (`--without-approved-summary` overrides and says so in the task's log).
+
 ## First real call
 
 No real provider call has been made yet. When a member has an account, this is the whole path from nothing to a verdict:
@@ -137,7 +147,7 @@ No real provider call has been made yet. When a member has an account, this is t
 1. Copy `config/hera.example.toml` to `<HERA_HOME>/hera.toml` and fill in `[providers.<name>]`: `kind`, `url`, the exact dated `model` id, `tier` and `key_env`, the NAME of an environment variable. The key itself never goes in a file. Name a second default-tier provider `default_alt` and a strong-tier one `strong` if you have them (the ladder uses them for a different second opinion, the diagnosis and the escalation). Copy `config/policy.example.toml` to `<HERA_HOME>/policy/policy.toml` and list the repository with its class: a repository that is not listed counts as sensitive and no remote provider will be used for it.
 2. Set that variable in your shell (`export ANTHROPIC_API_KEY=...`) and run `hera providers list`: the provider should show `key present: yes`.
 3. Run `hera providers check <name>`. It sends the fixed prompt "Reply with the single word: ready" through the gateway and prints the reply, the tokens and the dollars; exit status 0 means it worked. Then `hera status` shows the call and its cost.
-4. Write a spec by hand, with the requirements and the checks (visible and hidden), see the walkthrough in `docs/AGENT.md`, and run `hera checks freeze --task TASK --repo /path/to/repo --spec spec.toml`. It runs the checks on the base commit, refuses to freeze checks that are flaky or invalid, and prints the check-set hash.
+4. Write a spec by hand, with the requirements and the checks (visible and hidden), see the walkthrough in `docs/AGENT.md`, and write a `SUMMARY.toml` for it, `hera summary import` and `hera summary approve` it (see "How a task starts"), then run `hera checks freeze --task TASK --repo /path/to/repo --spec spec.toml --summary HASH`. It runs the checks on the base commit, refuses to freeze checks that are flaky or invalid, and prints the check-set hash.
 5. Run `hera run --task TASK --checkset HASH --objective "what you want done" --max-usd 1`. It prints each event as it happens (the routing decision, every attempt, every verification, the ladder's decisions) and ends with the status, the verdict and the dollars. Exit 0 means `PASSED`; 3 means any other final status (`FAILED`, `BUDGET_CENSORED`, `BLOCKED_PRIVACY`, ...).
 6. `hera task status TASK` shows the events again at any time. A task that was interrupted continues from where it stopped when you run the same `hera run` command again. A task that stopped as `BUDGET_CENSORED`, `PROVIDER_ERROR` or (once `hera dispute resolve` closed the dispute) `AWAITING_DISPUTE` goes on with `hera task continue TASK [--max-usd X]`; `hera report` shows the learning ledger.
 
@@ -151,7 +161,7 @@ Built through S9: the implementer loop, the orchestrator with the recovery ladde
 
 **S5 needs a Mac.** The supervisor (S5b) is built and tested against a fake model process; the real 9B MLX worker, its own memory limit and the second Mac benchmark pass wait for a Mac. See `docs/MODELHOST.md`.
 
-Still open from S7b/S7c: requirements summary and approval screen (terminal); two blind check authors; author hidden checks as contract checks wherever the task has an external surface (check authoring by models is not built; members write checks by hand with `hera checks freeze` until then).
+Still open from S7b/S7c: two blind check authors; author hidden checks as contract checks wherever the task has an external surface (check authoring by models is not built; members write checks by hand with `hera checks freeze` until then).
 
 ## Known gaps and honest caveats
 

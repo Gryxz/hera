@@ -169,3 +169,39 @@ CONTRACT_CHECKS = (C_BASIC, C_EMPTY, C_SEVEN, C_ADD)
 # Mixed: the pytest checks above plus a hidden contract check for R-1 and a visible one for R-2.
 MIXED_CHECKS = CHECKS + (C_SEVEN, C_EMPTY)
 MIXED_FILES = {**CHECK_FILES, "hidden_zq.contract.toml": CT_SEVEN, "empty.contract.toml": CT_EMPTY}
+
+
+# ---- requirements summary (S7d): every CLI freeze needs an approved one -------------------------------
+def toy_summary_toml(task: str, requirements=REQUIREMENTS, confidence: str = "high") -> str:
+    """A SUMMARY.toml for ``task`` with the toy requirements (invented content)."""
+    import json
+    q = json.dumps
+    lines = [f"task = {q(task)}", 'outcomes = ["Amounts such as 12.50 can be read as numbers"]',
+             'constraints = ["add keeps its behaviour"]', 'assumptions = ["an empty amount is an error"]',
+             'out_of_scope = ["currency symbols"]', "", "[[behaviour]]", 'given = "parse_amount(12.50)"',
+             'expect = "12.5"', ""]
+    for r in requirements:
+        lines += ["[[requirements]]", f"id = {q(r.id)}", f"text = {q(r.text)}", f"confidence = {q(confidence)}",
+                  "outcome = 1", ""]
+    return "\n".join(lines)
+
+
+def approve_toy_summary(task: str, directory, requirements=REQUIREMENTS, may_leave: bool = False,
+                        confidence: str = "high") -> str:
+    """Import and approve a summary of the toy requirements for ``task`` in the current HERA home (the
+    library, so nothing is printed) and return its hash. Importing again and approving an approved
+    summary again are no-ops."""
+    from hera import paths
+    from hera.oracle import summary
+    from hera.store import db
+    path = Path(directory) / f"SUMMARY-{task}.toml"
+    path.write_text(toy_summary_toml(task, requirements, confidence), encoding="utf-8")
+    s = summary.load_summary(path)
+    conn = db.connect(paths.db_path())
+    try:
+        h = summary.import_summary(conn, s)
+        if summary.state(conn, h)[0] != summary.APPROVED:
+            summary.decide(conn, h, summary.APPROVED, "human:tester", may_leave_machine=may_leave)
+    finally:
+        conn.close()
+    return h

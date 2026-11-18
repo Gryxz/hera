@@ -1,10 +1,12 @@
-# Acceptance oracle (S7a: checks, frozen store, pytest adapter, validation; S7b: audit, verify, verdicts, disputes; S7c: contract checks)
+# Acceptance oracle (S7a: checks, frozen store, pytest adapter, validation; S7b: audit, verify, verdicts, disputes; S7c: contract checks; S7d: requirements summary)
 
 Code: `src/hera/oracle/model.py`, `checkstore.py`, `adapters/pytest_adapter.py`, `validation.py`
-(S7a); `audit.py`, `verify.py`, `disputes.py` (S7b); `contract.py`, `contract_runner.py` (S7c).
+(S7a); `audit.py`, `verify.py`, `disputes.py` (S7b); `contract.py`, `contract_runner.py` (S7c);
+`summary.py` (S7d).
 Tests: `tests/test_checkstore.py`, `tests/test_pytest_adapter.py`, `tests/test_validation.py`
 (S7a); `tests/test_audit.py`, `tests/test_verify_e2e.py`, `tests/test_disputes.py` (S7b);
-`tests/test_contract.py`, `tests/test_contract_runner.py` (S7c), with
+`tests/test_contract.py`, `tests/test_contract_runner.py` (S7c); `tests/test_summary.py`,
+`tests/test_summary_cli.py` (S7d), with
 the invented toy project in `tests/toyrepo.py`.
 
 ## Objects
@@ -344,9 +346,110 @@ shared bare repository's `info/attributes` (writable from an implementer worktre
 a file as binary and hide its added lines from the line rules; a candidate that kills the runner is
 attributed `UNKNOWN` (with `environment_suspect`) although its verdict is TAMPER.
 
+## Requirements summary (S7d)
+
+The owner reads one screen and approves it before checks are frozen: outcomes, observable behaviour,
+constraints and assumptions, not individual tests. Checks are derived only from the approved version and
+its hash is stored with the check set. Code: `summary.py`; schema version 6.
+
+Block limits are the design's (outcomes 5, behaviour examples 6, constraints 5, assumptions 5, not
+verifiable 5, out of scope 3, questions 3). The design set no limit on requirements; **at most 6** is a
+first value chosen so the screen stays within 40 lines. A task that needs more requirements than that
+is probably several tasks; if real tasks keep hitting the limit, the layout (not the limit) should change.
+
+### Format (`SUMMARY.toml`)
+
+```toml
+task = "calc-1"
+outcomes = ["Amounts such as 12.50 can be read as numbers"]            # 1 to 5: what will be true when done
+constraints = ["add() keeps its behaviour"]                             # up to 5: what must not change
+assumptions = ["An empty amount is an error, not zero"]                 # up to 5, riskiest first
+not_verifiable = ["The error message reads well"]                       # up to 5: comes back for sign-off
+out_of_scope = ["Currency symbols"]                                     # up to 3
+
+[[behaviour]]                                                           # up to 6: action -> visible result
+given = "parse_amount('12.50')"
+expect = "12.5"
+
+[[questions]]                                                           # up to 3: only if the answer changes the checks
+q = "Should '1,250.00' be accepted?"
+answer = "No, plain digits and a dot only"                              # every question needs an answer before approval
+
+[[requirements]]                                                        # 1 to 6, with the planned verification confidence
+id = "R-1"                                                              # R-n, as in oracle.model.Requirement
+text = "parse_amount('12.50') returns 12.5"
+confidence = "high"                                                     # high | medium | low
+outcome = 1                                                             # optional: 1-based index into outcomes
+```
+
+Every item is one printable line of at most 200 characters (control characters, newlines and tabs are
+refused); the file is at most 64 KB; unknown keys anywhere, duplicate requirement ids, an `outcome` outside
+the list, a confidence other than high, medium or low, and any count above its limit are refused. Errors
+name the field (`behaviour[2]: expect: ...`) and never echo content. The block limits follow the design
+(A.15); the limit of six requirements is this build's, chosen so that the screen below always fits.
+
+### Hash, storage and approval
+
+`summary_hash` is the SHA-256 of a canonical JSON form (sorted keys, no whitespace, ASCII), so key order in
+the file does not matter and any change of content does. Tables (schema v6): `summaries(hash, task_id,
+summary_json, created_at)` is immutable (importing the same content again is a no-op); `summary_decisions(id,
+summary_hash, decision, decider, note, may_leave_machine, decided_at)` is append-only and the latest row is
+the state (none, approved or rejected). Triggers refuse updates and deletes of both. `decider` must be
+`human:<name>`. An approval needs `may_leave_machine` (yes or no, no default) and is refused while a
+question has no answer; a rejection needs a note. A rejected summary can still be approved later: both
+decisions stay on record. `may_leave_machine` is the declassification control for restricted repositories;
+it is recorded here and nothing uses it yet.
+
+```
+hera summary import FILE                      prints the hash and the screen
+hera summary show HASH | --task ID [--full]   --task: the latest imported for that task; --full wraps instead of cutting
+hera summary approve HASH --by human:<name> --may-leave-machine yes|no
+hera summary reject  HASH --by human:<name> --note TEXT
+hera summary list [--task ID]
+```
+
+To change a summary, edit the file and import it again: a new hash that needs a new approval. Exit 0 on
+success, 2 for an error or a refusal (nothing is recorded then).
+
+### The screen
+
+`render` gives at most 40 lines of at most 100 columns whatever the content (a test builds a summary at every
+limit): a left column names each block, then one line per item in the design's order (outcomes, behaviour,
+constraints, assumptions, not verifiable, out of scope, questions), then every requirement with its
+confidence (`LOW !!` for low) and its outcome, then a footer with the first 12 characters of the hash and the
+state (`NOT APPROVED`, `APPROVED | text may leave the machine: yes|no | by ...`, `REJECTED by ...: note`).
+An unanswered question reads `[UNANSWERED - blocks approval]`. Everything shown is flattened to printable
+single-line text. A line wider than the screen (counting East Asian wide characters as two columns) ends in
+`...` and the title says `(cut: --full)`: `hera summary show ... --full` wraps every line and has no bound.
+Read the full text of anything cut before approving.
+
+### What `hera checks freeze` checks
+
+`--summary HASH` is required. The summary must exist, belong to the same task and have an approval as its
+latest decision, and its requirements (ids and texts, exactly) must equal the SPEC.toml requirements; the
+message names the differing ids (never the texts). Any refusal exits 2 and nothing is frozen, not even the
+task workspace. `--skip-validation` still needs the summary. The canonical text of the summary goes into the
+check set's manifest as `summary_text`, so the check-set hash depends on it (the same checks frozen against
+a different approved summary are a different check set) and `verify_integrity` covers it; the hash is also
+stored in `checksets.summary_hash` (NULL for check sets frozen before schema 6 or through the library without
+one; `checkstore.summary_hash_of`).
+
+### What `hera run` checks
+
+`hera run` refuses a check set with no `summary_hash`, or whose summary's latest decision is not an approval
+(exit 2, with the commands that fix it). `--without-approved-summary` runs anyway. The routing event records
+`"summary"`: the summary's hash, or `"not approved (override)"` when the override was needed. `hera task
+status` shows the summary hash and state first. `hera run --checkset H` for a task whose log already has a
+routing event with a different check-set hash is refused (exit 2, nothing logged): an amended check goes on
+with `hera task continue`; otherwise start a new task id.
+
+The library (`run_task`, `continue_task`, `checkstore.freeze`) does not look at summaries; a caller that
+is not the command line must enforce approval itself. `TaskSpec.summary` only carries what the CLI wants
+written into the routing event.
+
 ## Not yet built
 
-Requirements summary and approval screen, two blind check
+Two blind check
 authors, persisting validation results into `checks.health`, stub adversaries
 and mutation testing (TODO, milestone 0.2), model-written checks (needs a real provider call),
 per-language environments (checks run with the same Python interpreter that runs HERA; building an

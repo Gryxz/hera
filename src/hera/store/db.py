@@ -3,7 +3,7 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -54,3 +54,24 @@ def migrate(conn: sqlite3.Connection) -> None:
             "task_id TEXT NOT NULL, seq INTEGER NOT NULL, at REAL, kind TEXT NOT NULL, detail_json TEXT, "
             "PRIMARY KEY(task_id, seq));"
             "PRAGMA user_version=5;COMMIT;")
+    if version < 6:      # requirements summaries (immutable), their decisions (append-only), checksets.summary_hash
+        conn.executescript(
+            "BEGIN;CREATE TABLE IF NOT EXISTS summaries ("
+            "hash TEXT PRIMARY KEY, task_id TEXT NOT NULL, summary_json TEXT NOT NULL, created_at REAL NOT NULL);"
+            "CREATE TABLE IF NOT EXISTS summary_decisions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, summary_hash TEXT NOT NULL REFERENCES summaries(hash), "
+            "decision TEXT NOT NULL CHECK (decision IN ('approved','rejected')), decider TEXT NOT NULL, note TEXT, "
+            "may_leave_machine INTEGER CHECK (may_leave_machine IN (0,1)), decided_at REAL NOT NULL, "
+            "CHECK ((decision='approved') = (may_leave_machine IS NOT NULL)));"
+            "CREATE INDEX IF NOT EXISTS summary_decisions_hash ON summary_decisions(summary_hash, id);"
+            "CREATE TRIGGER IF NOT EXISTS summaries_no_update BEFORE UPDATE ON summaries "
+            "BEGIN SELECT RAISE(ABORT, 'summaries are immutable'); END;"
+            "CREATE TRIGGER IF NOT EXISTS summaries_no_delete BEFORE DELETE ON summaries "
+            "BEGIN SELECT RAISE(ABORT, 'summaries are immutable'); END;"
+            "CREATE TRIGGER IF NOT EXISTS summary_decisions_no_update BEFORE UPDATE ON summary_decisions "
+            "BEGIN SELECT RAISE(ABORT, 'summary decisions are append-only'); END;"
+            "CREATE TRIGGER IF NOT EXISTS summary_decisions_no_delete BEFORE DELETE ON summary_decisions "
+            "BEGIN SELECT RAISE(ABORT, 'summary decisions are append-only'); END;"
+            + ("" if any(r[1] == "summary_hash" for r in conn.execute("PRAGMA table_info(checksets)"))
+               else "ALTER TABLE checksets ADD COLUMN summary_hash TEXT;")
+            + "PRAGMA user_version=6;COMMIT;")
